@@ -47,7 +47,6 @@ excludes = [
     'tkinter',
     'unittest',
     'test',
-    'distutils',
     'setuptools',
     'pydoc',
     'lib2to3',
