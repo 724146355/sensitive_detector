@@ -1,0 +1,14 @@
+# 自动检测文本文件的换行符
+* text=auto
+
+# Python 文件使用 LF 换行符
+*.py text eol=lf
+
+# 批处理文件使用 CRLF 换行符（Windows 兼容）
+*.bat text eol=crlf
+
+# 二进制文件不要自动转换
+*.exe binary
+*.dll binary
+*.ico binary
+*.png binary

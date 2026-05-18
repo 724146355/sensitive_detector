@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+
+# PyInstaller 构建产物
+dist/
+build/
+
+# 日志文件
+*.log
+
+# 备份文件
+sensitive_backup/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
