@@ -27,40 +27,42 @@ jobs:
 
       - name: 下载 Everything SDK DLL
         run: |
-          # 创建临时目录
-          mkdir -p temp_everything
-          cd temp_everything
-          
-          # 下载 Everything 便携版（包含 SDK DLL）
-          Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-1.4.1.1015.x64.zip" -OutFile "Everything.zip"
-          Expand-Archive -Path "Everything.zip" -DestinationPath "extracted" -Force
+          # 直接从 GitHub 下载官方 SDK 文件
+          Invoke-WebRequest -Uri "https://github.com/voidtools/EverythingSDK/releases/download/1.4.1.1015/EverythingSDK.zip" -OutFile "EverythingSDK.zip"
+          Expand-Archive -Path "EverythingSDK.zip" -DestinationPath "EverythingSDK" -Force
           
           # 查看解压后的文件结构
-          Write-Host "解压后的文件结构:"
-          Get-ChildItem -Path "extracted" -Recurse
+          Write-Host "SDK 解压后的文件结构:"
+          Get-ChildItem -Path "EverythingSDK" -Recurse
           
-          # 查找 DLL 文件（可能在子目录中）
-          $dll64 = Get-ChildItem -Path "extracted" -Recurse -Filter "Everything64.dll" | Select-Object -First 1
-          $dll32 = Get-ChildItem -Path "extracted" -Recurse -Filter "Everything.dll" | Select-Object -First 1
+          # 复制 DLL 文件到项目根目录
+          $dll64 = Get-ChildItem -Path "EverythingSDK" -Recurse -Filter "Everything64.dll" | Select-Object -First 1
+          $dll32 = Get-ChildItem -Path "EverythingSDK" -Recurse -Filter "Everything.dll" | Select-Object -First 1
           
           if ($dll64) {
-              Copy-Item -Path $dll64.FullName -Destination ".." -Force
+              Copy-Item -Path $dll64.FullName -Destination "." -Force
               Write-Host "已复制 Everything64.dll"
           } else {
-              Write-Host "未找到 Everything64.dll，跳过"
+              Write-Error "未找到 Everything64.dll，构建无法继续"
+              exit 1
           }
           
           if ($dll32) {
-              Copy-Item -Path $dll32.FullName -Destination ".." -Force
+              Copy-Item -Path $dll32.FullName -Destination "." -Force
               Write-Host "已复制 Everything.dll"
           } else {
-              Write-Host "未找到 Everything.dll，跳过"
+              Write-Host "未找到 Everything.dll（32位），跳过"
           }
           
-          cd ..
-          Remove-Item -Recurse -Force temp_everything
+          # 清理
+          Remove-Item -Recurse -Force EverythingSDK
+          Remove-Item -Force EverythingSDK.zip
           
           Write-Host "DLL 文件下载完成"
+          
+          # 验证文件存在
+          Write-Host "验证 DLL 文件:"
+          Get-ChildItem -Path "." -Filter "*.dll"
 
       - name: 安装项目依赖
         run: |
