@@ -17,6 +17,12 @@ SUPPORTED_EXTENSIONS = {
 # ============================================================
 _cached_imports = {}
 
+# 文本提取上限：防止单行超长或极端文件占用过多内存
+MAX_TEXT_CHARS = 10_000_000  # 约 10MB 文本
+
+# OLE 流读取上限：避免一次性加载超大二进制流
+MAX_OLE_STREAM_BYTES = 2 * 1024 * 1024  # 2MB
+
 
 def _lazy_import(module_name):
     """延迟导入并缓存，仅在首次使用时真正 import
@@ -65,9 +71,10 @@ class FileScanner:
         if size_mb < 0:
             self.logger.warning(f"无法获取文件大小: {file_path}")
             return True, -1
-        is_over = size_mb > self.max_file_size_bytes
+        max_size_mb = self.max_file_size_bytes / (1024 * 1024)
+        is_over = size_mb > max_size_mb
         if is_over:
-            self.logger.info(f"文件超过大小阈值 ({size_mb:.2f}MB > {self.max_file_size_bytes}MB)，跳过: {file_path}")
+            self.logger.info(f"文件超过大小阈值 ({size_mb:.2f}MB > {max_size_mb:.0f}MB)，跳过: {file_path}")
         return is_over, size_mb
 
     def extract_text(self, file_path):
@@ -157,12 +164,14 @@ class FileScanner:
 
     def _read_plain_text(self, file_path):
         content = []
+        total_chars = 0
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 for i, line in enumerate(f):
-                    if i >= 10000:
+                    if i >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
                     content.append(line)
+                    total_chars += len(line)
         except (IOError, PermissionError) as e:
             self.logger.warning(f"文本文件读取失败: {file_path} - {e}")
             return ""
@@ -178,20 +187,23 @@ class FileScanner:
             doc = Document(file_path)
             content = []
             line_count = 0
+            total_chars = 0
             for para in doc.paragraphs:
-                if line_count >= 10000:
+                if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                     break
                 content.append(para.text)
                 line_count += 1
+                total_chars += len(para.text)
             for table in doc.tables:
-                if line_count >= 10000:
+                if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                     break
                 for row in table.rows:
-                    if line_count >= 10000:
+                    if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
                     row_text = " ".join(cell.text for cell in row.cells)
                     content.append(row_text)
                     line_count += 1
+                    total_chars += len(row_text)
             return "\n".join(content)
         except Exception as e:
             self.logger.warning(f"docx 解析失败: {file_path} - {e}")
@@ -210,7 +222,8 @@ class FileScanner:
             ole = olefile.OleFileIO(file_path)
             try:
                 word_stream = ole.openstream("WordDocument")
-                data = word_stream.read()
+                # 仅读取需要的字节数，避免大文件一次性加载全部数据
+                data = word_stream.read(20002)
                 word_stream.close()
 
                 text_parts = []
@@ -249,20 +262,24 @@ class FileScanner:
         try:
             import openpyxl
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            content = []
-            line_count = 0
-            for sheet in wb.worksheets:
-                if line_count >= 10000:
-                    break
-                for row in sheet.iter_rows(values_only=True):
-                    if line_count >= 10000:
+            try:
+                content = []
+                line_count = 0
+                total_chars = 0
+                for sheet in wb.worksheets:
+                    if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
-                    row_text = " ".join(self._cell_to_str(cell) for cell in row if cell is not None)
-                    if row_text.strip():
-                        content.append(row_text)
-                        line_count += 1
-            wb.close()
-            return "\n".join(content)
+                    for row in sheet.iter_rows(values_only=True):
+                        if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
+                            break
+                        row_text = " ".join(self._cell_to_str(cell) for cell in row if cell is not None)
+                        if row_text.strip():
+                            content.append(row_text)
+                            line_count += 1
+                            total_chars += len(row_text)
+                return "\n".join(content)
+            finally:
+                wb.close()
         except Exception as e:
             self.logger.warning(f"xlsx 解析失败: {file_path} - {e}")
             return ""
@@ -277,18 +294,20 @@ class FileScanner:
             wb = xlrd.open_workbook(file_path)
             content = []
             line_count = 0
+            total_chars = 0
             for sheet_idx in range(wb.nsheets):
-                if line_count >= 10000:
+                if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                     break
                 sheet = wb.sheet_by_index(sheet_idx)
                 for row_idx in range(sheet.nrows):
-                    if line_count >= 10000:
+                    if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
                     row_values = sheet.row_values(row_idx)
                     row_text = " ".join(self._cell_to_str(v) for v in row_values if v != "")
                     if row_text.strip():
                         content.append(row_text)
                         line_count += 1
+                        total_chars += len(row_text)
             return "\n".join(content)
         except Exception as e:
             self.logger.warning(f"xls 解析失败: {file_path} - {e}")
@@ -296,15 +315,17 @@ class FileScanner:
 
     def _read_csv(self, file_path):
         content = []
+        total_chars = 0
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 reader = csv.reader(f)
                 for i, row in enumerate(reader):
-                    if i >= 10000:
+                    if i >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
                     row_text = " ".join(row)
                     if row_text.strip():
                         content.append(row_text)
+                        total_chars += len(row_text)
         except (IOError, PermissionError) as e:
             self.logger.warning(f"CSV 文件读取失败: {file_path} - {e}")
             return ""
@@ -320,29 +341,32 @@ class FileScanner:
             prs = Presentation(file_path)
             content = []
             line_count = 0
+            total_chars = 0
             for slide in prs.slides:
-                if line_count >= 10000:
+                if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                     break
                 for shape in slide.shapes:
-                    if line_count >= 10000:
+                    if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
                     if shape.has_text_frame:
                         for para in shape.text_frame.paragraphs:
-                            if line_count >= 10000:
+                            if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                                 break
                             text = para.text.strip()
                             if text:
                                 content.append(text)
                                 line_count += 1
+                                total_chars += len(text)
                     if shape.has_table:
                         table = shape.table
                         for row in table.rows:
-                            if line_count >= 10000:
+                            if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                                 break
                             row_text = " ".join(cell.text for cell in row.cells)
                             if row_text.strip():
                                 content.append(row_text)
                                 line_count += 1
+                                total_chars += len(row_text)
             return "\n".join(content)
         except Exception as e:
             self.logger.warning(f"pptx 解析失败: {file_path} - {e}")
@@ -369,7 +393,7 @@ class FileScanner:
                     if "text" in name or "word" in name:
                         try:
                             stream = ole.openstream("/".join(stream_name))
-                            data = stream.read()
+                            data = stream.read(MAX_OLE_STREAM_BYTES)
                             stream.close()
                             text = data.decode("utf-8", errors="replace")
                             for line in text.split("\n"):
@@ -424,21 +448,25 @@ class FileScanner:
         try:
             import fitz
             doc = fitz.open(file_path)
-            content = []
-            line_count = 0
-            for page in doc:
-                if line_count >= 10000:
-                    break
-                text = page.get_text()
-                if text:
-                    for line in text.split("\n"):
-                        if line_count >= 10000:
-                            break
-                        if line.strip():
-                            content.append(line.strip())
-                            line_count += 1
-            doc.close()
-            return "\n".join(content)
+            try:
+                content = []
+                line_count = 0
+                total_chars = 0
+                for page in doc:
+                    if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
+                        break
+                    text = page.get_text()
+                    if text:
+                        for line in text.split("\n"):
+                            if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
+                                break
+                            if line.strip():
+                                content.append(line.strip())
+                                line_count += 1
+                                total_chars += len(line)
+                return "\n".join(content)
+            finally:
+                doc.close()
         except Exception as e:
             self.logger.warning(f"PyMuPDF 解析失败，回退到 pdfplumber: {file_path} - {e}")
             return self._read_pdf_pdfplumber(file_path)
@@ -449,18 +477,20 @@ class FileScanner:
             import pdfplumber
             content = []
             line_count = 0
+            total_chars = 0
             with pdfplumber.open(file_path) as pdf:
                 for page in pdf.pages:
-                    if line_count >= 10000:
+                    if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                         break
                     text = page.extract_text()
                     if text:
                         for line in text.split("\n"):
-                            if line_count >= 10000:
+                            if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                                 break
                             if line.strip():
                                 content.append(line.strip())
                                 line_count += 1
+                                total_chars += len(line)
             return "\n".join(content)
         except Exception as e:
             self.logger.warning(f"PDF 解析失败: {file_path} - {e}")
@@ -487,7 +517,7 @@ class FileScanner:
                     if "text" in name or "content" in name or "worddocument" in name:
                         try:
                             stream = ole.openstream("/".join(stream_name))
-                            data = stream.read()
+                            data = stream.read(MAX_OLE_STREAM_BYTES)
                             stream.close()
                             text = data.decode("utf-8", errors="replace")
                             for line in text.split("\n"):
@@ -500,7 +530,7 @@ class FileScanner:
                             continue
                 if not text_parts:
                     stream = ole.openstream("WordDocument")
-                    data = stream.read()
+                    data = stream.read(20002)
                     stream.close()
                     for i in range(0, min(len(data), 20000), 2):
                         char_code = data[i] | (data[i + 1] << 8)
@@ -622,44 +652,45 @@ class FileScanner:
         try:
             import openpyxl
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            accumulated = None
-            chunk_parts = []
-            chunk_size = 0
-            CHUNK_THRESHOLD = 100
-            line_count = 0
+            try:
+                accumulated = None
+                chunk_parts = []
+                chunk_size = 0
+                CHUNK_THRESHOLD = 100
+                line_count = 0
 
-            for sheet in wb.worksheets:
-                if line_count >= 10000:
-                    break
-                for row in sheet.iter_rows(values_only=True):
+                for sheet in wb.worksheets:
                     if line_count >= 10000:
                         break
-                    row_text = " ".join(self._cell_to_str(cell) for cell in row if cell is not None)
-                    if row_text.strip():
-                        chunk_parts.append(row_text)
-                        chunk_size += 1
-                        line_count += 1
-                        if chunk_size >= CHUNK_THRESHOLD:
-                            chunk_text = "\n".join(chunk_parts)
-                            should_stop, accumulated = matcher.scan_text_incremental(
-                                chunk_text, accumulated
-                            )
-                            chunk_parts = []
-                            chunk_size = 0
-                            if should_stop:
-                                wb.close()
-                                is_sensitive, details = matcher.get_match_details(accumulated)
-                                return is_sensitive, details, size_mb
+                    for row in sheet.iter_rows(values_only=True):
+                        if line_count >= 10000:
+                            break
+                        row_text = " ".join(self._cell_to_str(cell) for cell in row if cell is not None)
+                        if row_text.strip():
+                            chunk_parts.append(row_text)
+                            chunk_size += 1
+                            line_count += 1
+                            if chunk_size >= CHUNK_THRESHOLD:
+                                chunk_text = "\n".join(chunk_parts)
+                                should_stop, accumulated = matcher.scan_text_incremental(
+                                    chunk_text, accumulated
+                                )
+                                chunk_parts = []
+                                chunk_size = 0
+                                if should_stop:
+                                    is_sensitive, details = matcher.get_match_details(accumulated)
+                                    return is_sensitive, details, size_mb
 
-            wb.close()
-            if chunk_parts:
-                chunk_text = "\n".join(chunk_parts)
-                should_stop, accumulated = matcher.scan_text_incremental(
-                    chunk_text, accumulated
-                )
+                if chunk_parts:
+                    chunk_text = "\n".join(chunk_parts)
+                    should_stop, accumulated = matcher.scan_text_incremental(
+                        chunk_text, accumulated
+                    )
 
-            is_sensitive, details = matcher.get_match_details(accumulated or {})
-            return is_sensitive, details, size_mb
+                is_sensitive, details = matcher.get_match_details(accumulated or {})
+                return is_sensitive, details, size_mb
+            finally:
+                wb.close()
         except Exception as e:
             self.logger.warning(f"xlsx 增量解析失败: {file_path} - {e}")
             return False, [], size_mb
@@ -847,46 +878,47 @@ class FileScanner:
         try:
             import fitz
             doc = fitz.open(file_path)
-            accumulated = None
-            chunk_parts = []
-            chunk_size = 0
-            CHUNK_THRESHOLD = 10  # PDF 每页内容多，每 10 页检测一次
-            line_count = 0
+            try:
+                accumulated = None
+                chunk_parts = []
+                chunk_size = 0
+                CHUNK_THRESHOLD = 10  # PDF 每页内容多，每 10 页检测一次
+                line_count = 0
 
-            for page in doc:
-                if line_count >= 10000:
-                    break
-                text = page.get_text()
-                if text:
-                    for line in text.split("\n"):
-                        if line_count >= 10000:
-                            break
-                        if line.strip():
-                            chunk_parts.append(line.strip())
-                            chunk_size += 1
-                            line_count += 1
+                for page in doc:
+                    if line_count >= 10000:
+                        break
+                    text = page.get_text()
+                    if text:
+                        for line in text.split("\n"):
+                            if line_count >= 10000:
+                                break
+                            if line.strip():
+                                chunk_parts.append(line.strip())
+                                chunk_size += 1
+                                line_count += 1
 
-                if chunk_size >= CHUNK_THRESHOLD:
+                    if chunk_size >= CHUNK_THRESHOLD:
+                        chunk_text = "\n".join(chunk_parts)
+                        should_stop, accumulated = matcher.scan_text_incremental(
+                            chunk_text, accumulated
+                        )
+                        chunk_parts = []
+                        chunk_size = 0
+                        if should_stop:
+                            is_sensitive, details = matcher.get_match_details(accumulated)
+                            return is_sensitive, details, size_mb
+
+                if chunk_parts:
                     chunk_text = "\n".join(chunk_parts)
                     should_stop, accumulated = matcher.scan_text_incremental(
                         chunk_text, accumulated
                     )
-                    chunk_parts = []
-                    chunk_size = 0
-                    if should_stop:
-                        doc.close()
-                        is_sensitive, details = matcher.get_match_details(accumulated)
-                        return is_sensitive, details, size_mb
 
-            doc.close()
-            if chunk_parts:
-                chunk_text = "\n".join(chunk_parts)
-                should_stop, accumulated = matcher.scan_text_incremental(
-                    chunk_text, accumulated
-                )
-
-            is_sensitive, details = matcher.get_match_details(accumulated or {})
-            return is_sensitive, details, size_mb
+                is_sensitive, details = matcher.get_match_details(accumulated or {})
+                return is_sensitive, details, size_mb
+            finally:
+                doc.close()
         except Exception as e:
             self.logger.warning(f"PyMuPDF 增量解析失败，回退: {file_path} - {e}")
             return self._read_pdf_pdfplumber_incremental(file_path, matcher, size_mb)
@@ -898,17 +930,19 @@ class FileScanner:
             reader = PdfReader(file_path)
             content = []
             line_count = 0
+            total_chars = 0
             for page in reader.pages:
-                if line_count >= 10000:
+                if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                     break
                 text = page.extract_text()
                 if text:
                     for line in text.split("\n"):
-                        if line_count >= 10000:
+                        if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                             break
                         if line.strip():
                             content.append(line.strip())
                             line_count += 1
+                            total_chars += len(line)
             return "\n".join(content)
         except Exception as e:
             self.logger.warning(f"pypdf 解析失败: {file_path} - {e}")
@@ -921,17 +955,19 @@ class FileScanner:
             reader = PdfReader(file_path)
             content = []
             line_count = 0
+            total_chars = 0
             for page in reader.pages:
-                if line_count >= 10000:
+                if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                     break
                 text = page.extract_text()
                 if text:
                     for line in text.split("\n"):
-                        if line_count >= 10000:
+                        if line_count >= 10000 or total_chars >= MAX_TEXT_CHARS:
                             break
                         if line.strip():
                             content.append(line.strip())
                             line_count += 1
+                            total_chars += len(line)
             return "\n".join(content)
         except Exception as e:
             self.logger.warning(f"PyPDF2 解析失败: {file_path} - {e}")

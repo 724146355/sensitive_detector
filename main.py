@@ -3,7 +3,8 @@ import sys
 import json
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from logger import Logger
 from config_loader import ConfigLoader
 from file_scanner import FileScanner, SUPPORTED_EXTENSIONS
@@ -160,11 +161,13 @@ def main():
     match_threshold = config_loader.get_match_threshold()
     backup_base_path = config_loader.get_backup_base_path()
     dev_mode = config_loader.get_dev_mode()
+    file_timeout = config_loader.get_file_timeout()
 
     logger.info(f"默认文件大小阈值: {default_max_size}MB")
     logger.info(f"正则匹配阈值: {match_threshold}次")
     logger.info(f"备份基路径: {backup_base_path or '(未配置)'}")
     logger.info(f"运行模式: {'开发模式(仅复制)' if dev_mode else '正式模式(剪切)'}")
+    logger.info(f"单文件超时: {file_timeout}秒")
 
     logger.info("-" * 60)
     logger.info("请输入启动参数")
@@ -238,10 +241,13 @@ def main():
 
     completed_count = 0
     skipped_count = 0
+    timeout_count = 0
     SILENT_THRESHOLD_MS = 200
     last_progress_pct = -1
+    HEARTBEAT_INTERVAL = 5  # 每 5 秒输出一次心跳日志
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # 提交所有文件处理任务
         future_to_file = {
             executor.submit(
                 process_single_file, fp, scanner, matcher, everything_filtered_size
@@ -249,46 +255,95 @@ def main():
             for fp in target_files
         }
 
-        for future in as_completed(future_to_file):
-            file_path, is_sensitive, details, size_mb, elapsed_ms = future.result()
-            completed_count += 1
+        # 记录每个 future 的提交时间，用于超时判定
+        future_start_times = {f: time.monotonic() for f in future_to_file}
 
-            # --- 敏感文件：打印 + 立即复制/剪切 ---
-            if is_sensitive:
-                logger.info(f"[{completed_count}/{total_files}] {file_path}")
-                logger.info(f"  判定结果: [敏感文件] ({elapsed_ms:.0f}ms)")
-                for d in details:
-                    logger.info(f"    匹配规则: {d['rule_name']} (匹配 {d['match_count']} 次)")
+        pending = set(future_to_file.keys())
+        last_heartbeat = time.monotonic()
 
-                # 命中即复制/剪切到备份目录
-                dest_path = mover.transfer_file(file_path, date_folder)
-                if dest_path:
-                    with transferred_lock:
-                        transferred_files.append(dest_path)
-                continue
+        # 使用 wait + 短轮询：每隔几秒检查已完成的 future
+        # 同时检测超时的 future，避免单个慢文件卡住整个循环
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending, timeout=HEARTBEAT_INTERVAL,
+                return_when=concurrent.futures.FIRST_COMPLETED
+            )
 
-            # --- 异常/超限文件 ---
-            if size_mb < 0:
-                logger.info(f"[{completed_count}/{total_files}] 跳过（无法获取大小）: {file_path}")
-                continue
-            if size_mb > effective_max_size and not everything_filtered_size:
-                logger.info(f"[{completed_count}/{total_files}] 跳过（超出大小阈值 {size_mb:.2f}MB）: {file_path}")
-                continue
+            # 处理已完成的 future
+            for future in done:
+                file_path, is_sensitive, details, size_mb, elapsed_ms = future.result()
+                completed_count += 1
 
-            # --- 安全文件 ---
-            if elapsed_ms <= SILENT_THRESHOLD_MS:
-                skipped_count += 1
+                # --- 敏感文件：打印 + 立即复制/剪切 ---
+                if is_sensitive:
+                    logger.info(f"[{completed_count}/{total_files}] {file_path}")
+                    logger.info(f"  判定结果: [敏感文件] ({elapsed_ms:.0f}ms)")
+                    for d in details:
+                        logger.info(f"    匹配规则: {d['rule_name']} (匹配 {d['match_count']} 次)")
+
+                    dest_path = mover.transfer_file(file_path, date_folder)
+                    if dest_path:
+                        with transferred_lock:
+                            transferred_files.append(dest_path)
+                    continue
+
+                # --- 异常/超限文件 ---
+                if size_mb < 0:
+                    logger.info(f"[{completed_count}/{total_files}] 跳过（无法获取大小）: {file_path}")
+                    continue
+                if size_mb > effective_max_size and not everything_filtered_size:
+                    logger.info(f"[{completed_count}/{total_files}] 跳过（超出大小阈值 {size_mb:.2f}MB）: {file_path}")
+                    continue
+
+                # --- 安全文件 ---
+                if elapsed_ms <= SILENT_THRESHOLD_MS:
+                    skipped_count += 1
+                else:
+                    logger.info(f"[{completed_count}/{total_files}] {file_path}")
+                    logger.info(f"  判定结果: [安全文件] ({elapsed_ms:.0f}ms, {size_mb:.2f}MB)")
+
+                pct = completed_count * 100 // total_files
+                if pct >= last_progress_pct + 5:
+                    last_progress_pct = pct
+                    logger.info(f"进度: {pct}% ({completed_count}/{total_files})")
+
+            # 检查超时的 future
+            now = time.monotonic()
+            timed_out = set()
+            for f in list(pending):
+                elapsed_sec = now - future_start_times[f]
+                if elapsed_sec > file_timeout:
+                    timed_out.add(f)
+                    fp = future_to_file[f]
+                    logger.error(
+                        f"文件处理超时（>{file_timeout}s），跳过: {fp}"
+                    )
+                    timeout_count += 1
+                    completed_count += 1
+
+            # 将超时的 future 移出 pending（不再等待）
+            pending -= timed_out
+
+            # 心跳日志：如果没有新完成的结果，也输出状态让用户知道程序没卡死
+            if not done and not timed_out:
+                elapsed_since_last = now - last_heartbeat
+                if elapsed_since_last >= HEARTBEAT_INTERVAL:
+                    last_heartbeat = now
+                    running_files = [os.path.basename(future_to_file[f]) for f in pending]
+                    running_display = ", ".join(running_files[:3])
+                    if len(running_files) > 3:
+                        running_display += f" 等{len(running_files)}个"
+                    logger.info(
+                        f"处理中... 已完成 {completed_count}/{total_files}，"
+                        f"运行中: {running_display}"
+                    )
             else:
-                logger.info(f"[{completed_count}/{total_files}] {file_path}")
-                logger.info(f"  判定结果: [安全文件] ({elapsed_ms:.0f}ms, {size_mb:.2f}MB)")
-
-            pct = completed_count * 100 // total_files
-            if pct >= last_progress_pct + 5:
-                last_progress_pct = pct
-                logger.info(f"进度: {pct}% ({completed_count}/{total_files})")
+                last_heartbeat = now
 
     if skipped_count > 0:
         logger.info(f"其中 {skipped_count} 个文件快速通过（<{SILENT_THRESHOLD_MS}ms）")
+    if timeout_count > 0:
+        logger.info(f"其中 {timeout_count} 个文件处理超时（>{file_timeout}s）")
 
     logger.info("-" * 60)
     logger.info(f"检测完成，共发现 {len(transferred_files)} 个敏感文件")

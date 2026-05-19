@@ -22,7 +22,8 @@ CONFIG_DEFAULT = {
     "max_file_size_mb": 100,
     "match_threshold": 3,
     "backup_base_path": ".\\sensitive_backup",
-    "dev": False
+    "dev": False,
+    "file_timeout_sec": 30
 }
 
 
@@ -80,6 +81,10 @@ class ConfigLoader:
     def get_dev_mode(self):
         """获取开发模式：dev=true 只复制文件，dev=false 剪切文件"""
         return bool(self.config.get("dev", CONFIG_DEFAULT["dev"]))
+
+    def get_file_timeout(self):
+        """获取单文件处理超时时间（秒），超过此时间跳过该文件"""
+        return int(self.config.get("file_timeout_sec", CONFIG_DEFAULT["file_timeout_sec"]))
 
     def _write_default_config(self):
         try:
