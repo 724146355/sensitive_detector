@@ -1,6 +1,5 @@
 import os
 import csv
-import io
 from logger import Logger
 
 SUPPORTED_EXTENSIONS = {
@@ -165,6 +164,13 @@ class FileScanner:
             self.logger.warning(f"doc 解析失败: {file_path} - {e}")
             return ""
 
+    @staticmethod
+    def _cell_to_str(value):
+        if isinstance(value, float):
+            if value == int(value):
+                return str(int(value))
+        return str(value)
+
     def _read_xlsx(self, file_path):
         try:
             import openpyxl
@@ -177,7 +183,7 @@ class FileScanner:
                 for row in sheet.iter_rows(values_only=True):
                     if line_count >= 10000:
                         break
-                    row_text = " ".join(str(cell) for cell in row if cell is not None)
+                    row_text = " ".join(self._cell_to_str(cell) for cell in row if cell is not None)
                     if row_text.strip():
                         content.append(row_text)
                         line_count += 1
@@ -204,7 +210,7 @@ class FileScanner:
                     if line_count >= 10000:
                         break
                     row_values = sheet.row_values(row_idx)
-                    row_text = " ".join(str(v) for v in row_values if v != "")
+                    row_text = " ".join(self._cell_to_str(v) for v in row_values if v != "")
                     if row_text.strip():
                         content.append(row_text)
                         line_count += 1
