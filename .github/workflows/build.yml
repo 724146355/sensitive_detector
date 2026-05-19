@@ -27,42 +27,74 @@ jobs:
 
       - name: 下载 Everything SDK DLL
         run: |
-          # 直接从 GitHub 下载官方 SDK 文件
-          Invoke-WebRequest -Uri "https://github.com/voidtools/EverythingSDK/releases/download/1.4.1.1015/EverythingSDK.zip" -OutFile "EverythingSDK.zip"
-          Expand-Archive -Path "EverythingSDK.zip" -DestinationPath "EverythingSDK" -Force
+          # 尝试多个下载源
+          $downloadSuccess = $false
+          $downloadUrls = @(
+              "https://www.voidtools.com/Everything-SDK.zip",
+              "https://github.com/voidtools/Everything/raw/master/Dependencies/EverythingSDK/bin/Release/x64/Everything64.dll",
+              "https://raw.githubusercontent.com/voidtools/Everything/master/Dependencies/EverythingSDK/bin/Release/Win32/Everything.dll"
+          )
           
-          # 查看解压后的文件结构
-          Write-Host "SDK 解压后的文件结构:"
-          Get-ChildItem -Path "EverythingSDK" -Recurse
-          
-          # 复制 DLL 文件到项目根目录
-          $dll64 = Get-ChildItem -Path "EverythingSDK" -Recurse -Filter "Everything64.dll" | Select-Object -First 1
-          $dll32 = Get-ChildItem -Path "EverythingSDK" -Recurse -Filter "Everything.dll" | Select-Object -First 1
-          
-          if ($dll64) {
-              Copy-Item -Path $dll64.FullName -Destination "." -Force
-              Write-Host "已复制 Everything64.dll"
-          } else {
-              Write-Error "未找到 Everything64.dll，构建无法继续"
-              exit 1
+          # 先尝试从 voidtools 下载完整 SDK
+          try {
+              Write-Host "尝试从 voidtools.com 下载 SDK..."
+              $wc = New-Object System.Net.WebClient
+              $wc.DownloadFile("https://www.voidtools.com/Everything-SDK.zip", "EverythingSDK.zip")
+              Expand-Archive -Path "EverythingSDK.zip" -DestinationPath "EverythingSDK" -Force
+              
+              $dll64 = Get-ChildItem -Path "EverythingSDK" -Recurse -Filter "Everything64.dll" | Select-Object -First 1
+              $dll32 = Get-ChildItem -Path "EverythingSDK" -Recurse -Filter "Everything.dll" | Select-Object -First 1
+              
+              if ($dll64) {
+                  Copy-Item -Path $dll64.FullName -Destination "." -Force
+                  Write-Host "已复制 Everything64.dll"
+              }
+              if ($dll32) {
+                  Copy-Item -Path $dll32.FullName -Destination "." -Force
+                  Write-Host "已复制 Everything.dll"
+              }
+              
+              Remove-Item -Recurse -Force EverythingSDK
+              Remove-Item -Force EverythingSDK.zip
+              $downloadSuccess = $true
+          } catch {
+              Write-Host "从 voidtools.com 下载失败: $_"
           }
           
-          if ($dll32) {
-              Copy-Item -Path $dll32.FullName -Destination "." -Force
-              Write-Host "已复制 Everything.dll"
-          } else {
-              Write-Host "未找到 Everything.dll（32位），跳过"
+          # 如果上面失败，尝试直接下载单个 DLL
+          if (-not $downloadSuccess) {
+              Write-Host "尝试直接下载 DLL 文件..."
+              $wc = New-Object System.Net.WebClient
+              
+              try {
+                  $wc.DownloadFile("https://github.com/voidtools/Everything/releases/download/1.4.1.1015/Everything-1.4.1.1015.x64.zip", "Everything.zip")
+                  Expand-Archive -Path "Everything.zip" -DestinationPath "Everything" -Force
+                  
+                  $dll64 = Get-ChildItem -Path "Everything" -Recurse -Filter "Everything64.dll" | Select-Object -First 1
+                  if ($dll64) {
+                      Copy-Item -Path $dll64.FullName -Destination "." -Force
+                      Write-Host "已复制 Everything64.dll"
+                      $downloadSuccess = $true
+                  }
+                  
+                  Remove-Item -Recurse -Force Everything
+                  Remove-Item -Force Everything.zip
+              } catch {
+                  Write-Host "下载失败: $_"
+              }
           }
-          
-          # 清理
-          Remove-Item -Recurse -Force EverythingSDK
-          Remove-Item -Force EverythingSDK.zip
-          
-          Write-Host "DLL 文件下载完成"
           
           # 验证文件存在
           Write-Host "验证 DLL 文件:"
           Get-ChildItem -Path "." -Filter "*.dll"
+          
+          # 检查是否成功获取到关键的 64 位 DLL
+          if (-not (Test-Path "Everything64.dll")) {
+              Write-Error "未能获取 Everything64.dll，构建无法继续"
+              exit 1
+          }
+          
+          Write-Host "DLL 文件下载完成"
 
       - name: 安装项目依赖
         run: |
