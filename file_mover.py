@@ -15,42 +15,30 @@ class FileMover:
         self._bat_counter = 0
 
     def create_date_folder(self):
-        """创建日期文件夹，如果已存在则追加 _1, _2, ... 编号
+        """创建日期文件夹，同一天多次扫描复用同一文件夹
 
-        例如：
-          首次: ./sensitive_backup/20260519/
-          再次: ./sensitive_backup/20260519_1/
-          第三: ./sensitive_backup/20260519_2/
+        目录结构:
+          ./sensitive_backup/20260519/
+          ./sensitive_backup/20260519/target/    ← 敏感文件存放目录
+          ./sensitive_backup/20260519/restore.bat
+          ./sensitive_backup/20260519/scan.log
         """
         date_str = datetime.now().strftime("%Y%m%d")
 
         if not self.backup_base_path:
             return self._fallback_to_desktop(date_str)
 
-        # 尝试创建日期文件夹，若已存在则追加编号
-        target_path = os.path.join(self.backup_base_path, date_str)
-        if not os.path.exists(target_path):
-            try:
-                os.makedirs(target_path, exist_ok=True)
-                self.logger.info(f"创建备份文件夹: {target_path}")
-                return target_path
-            except (OSError, PermissionError) as e:
-                self.logger.warning(f"目标路径创建失败 ({target_path})，降级到桌面: {e}")
-                return self._fallback_to_desktop(date_str)
-
-        # 文件夹已存在，追加编号 _1, _2, ...
-        counter = 1
-        while True:
-            numbered_path = os.path.join(self.backup_base_path, f"{date_str}_{counter}")
-            if not os.path.exists(numbered_path):
-                try:
-                    os.makedirs(numbered_path, exist_ok=True)
-                    self.logger.info(f"创建备份文件夹(编号): {numbered_path}")
-                    return numbered_path
-                except (OSError, PermissionError) as e:
-                    self.logger.warning(f"目标路径创建失败 ({numbered_path})，降级到桌面: {e}")
-                    return self._fallback_to_desktop(date_str)
-            counter += 1
+        date_folder = os.path.join(self.backup_base_path, date_str)
+        try:
+            os.makedirs(date_folder, exist_ok=True)
+            # 创建 target 子文件夹（存放复制/剪切的敏感文件）
+            target_subfolder = os.path.join(date_folder, "target")
+            os.makedirs(target_subfolder, exist_ok=True)
+            self.logger.info(f"备份目录: {date_folder}")
+            return date_folder
+        except (OSError, PermissionError) as e:
+            self.logger.warning(f"目标路径创建失败 ({date_folder})，降级到桌面: {e}")
+            return self._fallback_to_desktop(date_str)
 
     def transfer_file(self, src_path, dest_folder):
         """单个文件传输：根据 dev_mode 决定是复制还是剪切
@@ -111,25 +99,39 @@ class FileMover:
         return moved_files
 
     def init_restore_bat(self, date_folder):
-        """初始化还原批处理文件，在日期文件夹中创建 restore.bat"""
+        """初始化还原批处理文件，在日期文件夹中创建 restore.bat
+
+        如果文件已存在（同日多次扫描），追加分隔符而非覆盖
+        """
         self.bat_file_path = os.path.join(date_folder, "restore.bat")
         self._bat_counter = 0
         try:
-            with open(self.bat_file_path, "w", encoding="utf-8") as f:
-                f.write("@echo off\n")
-                f.write("chcp 65001 >nul\n")
-                f.write("echo ============================================\n")
-                f.write("echo   敏感文件还原批处理\n")
-                f.write("echo ============================================\n")
-                f.write("echo.\n")
-                if self.dev_mode:
-                    f.write("echo 运行模式: 开发模式(原文件仍保留在原位置)\n")
-                else:
-                    f.write("echo 运行模式: 正式模式(原文件已被剪切)\n")
-                f.write("echo.\n")
-                f.write("echo 开始还原敏感文件到原始路径...\n")
-                f.write("echo.\n")
-            self.logger.info(f"已创建还原批处理文件: {self.bat_file_path}")
+            if os.path.exists(self.bat_file_path):
+                # 同日多次扫描：追加分隔符
+                with open(self.bat_file_path, "a", encoding="utf-8") as f:
+                    f.write("\n")
+                    f.write("echo ============================================\n")
+                    f.write(f"echo   扫描还原 - {datetime.now().strftime('%H:%M:%S')}\n")
+                    f.write("echo ============================================\n")
+                    f.write("echo.\n")
+                self.logger.info(f"追加还原批处理文件: {self.bat_file_path}")
+            else:
+                # 首次创建
+                with open(self.bat_file_path, "w", encoding="utf-8") as f:
+                    f.write("@echo off\n")
+                    f.write("chcp 65001 >nul\n")
+                    f.write("echo ============================================\n")
+                    f.write("echo   敏感文件还原批处理\n")
+                    f.write("echo ============================================\n")
+                    f.write("echo.\n")
+                    if self.dev_mode:
+                        f.write("echo 运行模式: 开发模式(原文件仍保留在原位置)\n")
+                    else:
+                        f.write("echo 运行模式: 正式模式(原文件已被剪切)\n")
+                    f.write("echo.\n")
+                    f.write("echo 开始还原敏感文件到原始路径...\n")
+                    f.write("echo.\n")
+                self.logger.info(f"已创建还原批处理文件: {self.bat_file_path}")
         except (IOError, OSError) as e:
             self.logger.warning(f"批处理文件创建失败: {e}")
             self.bat_file_path = None
@@ -172,7 +174,7 @@ class FileMover:
             with self.bat_lock:
                 with open(self.bat_file_path, "a", encoding="utf-8") as f:
                     f.write("echo.\n")
-                    f.write(f"echo 还原完成! 共 {self._bat_counter} 个文件\n")
+                    f.write(f"echo 本次还原 {self._bat_counter} 个文件\n")
                     f.write("echo.\n")
                     f.write("pause\n")
         except (IOError, OSError) as e:
@@ -191,7 +193,7 @@ class FileMover:
             counter += 1
 
     def _fallback_to_desktop(self, date_str):
-        """降级到桌面/当前目录创建文件夹"""
+        """降级到桌面/当前目录创建文件夹（同日复用，不追加编号）"""
         desktop = os.path.join(os.path.expanduser("~"), "Desktop")
         if not os.path.exists(desktop):
             desktop = os.path.join(os.path.expanduser("~"), "桌面")
@@ -204,31 +206,18 @@ class FileMover:
             except Exception:
                 desktop = "C:\\"
 
-        target_path = os.path.join(desktop, date_str)
-        if os.path.exists(target_path):
-            counter = 1
-            while True:
-                numbered_path = os.path.join(desktop, f"{date_str}_{counter}")
-                if not os.path.exists(numbered_path):
-                    target_path = numbered_path
-                    break
-                counter += 1
-
+        date_folder = os.path.join(desktop, date_str)
         try:
-            os.makedirs(target_path, exist_ok=True)
-            self.logger.info(f"降级创建备份文件夹: {target_path}")
-            return target_path
+            os.makedirs(date_folder, exist_ok=True)
+            target_subfolder = os.path.join(date_folder, "target")
+            os.makedirs(target_subfolder, exist_ok=True)
+            self.logger.info(f"降级创建备份文件夹: {date_folder}")
+            return date_folder
         except (OSError, PermissionError) as e:
             self.logger.error(f"桌面路径创建也失败: {e}")
-            alt_path = os.path.join(os.getcwd(), date_str)
-            if os.path.exists(alt_path):
-                counter = 1
-                while True:
-                    numbered_alt = os.path.join(os.getcwd(), f"{date_str}_{counter}")
-                    if not os.path.exists(numbered_alt):
-                        alt_path = numbered_alt
-                        break
-                    counter += 1
-            os.makedirs(alt_path, exist_ok=True)
-            self.logger.info(f"最终降级到当前目录: {alt_path}")
-            return alt_path
+            alt_folder = os.path.join(os.getcwd(), date_str)
+            os.makedirs(alt_folder, exist_ok=True)
+            target_subfolder = os.path.join(alt_folder, "target")
+            os.makedirs(target_subfolder, exist_ok=True)
+            self.logger.info(f"最终降级到当前目录: {alt_folder}")
+            return alt_folder
