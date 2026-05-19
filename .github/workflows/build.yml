@@ -35,9 +35,27 @@ jobs:
           Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-1.4.1.1015.x64.zip" -OutFile "Everything.zip"
           Expand-Archive -Path "Everything.zip" -DestinationPath "extracted" -Force
           
-          # 复制 DLL 到项目根目录
-          Copy-Item -Path "extracted\Everything64.dll" -Destination ".." -Force
-          Copy-Item -Path "extracted\Everything.dll" -Destination ".." -Force
+          # 查看解压后的文件结构
+          Write-Host "解压后的文件结构:"
+          Get-ChildItem -Path "extracted" -Recurse
+          
+          # 查找 DLL 文件（可能在子目录中）
+          $dll64 = Get-ChildItem -Path "extracted" -Recurse -Filter "Everything64.dll" | Select-Object -First 1
+          $dll32 = Get-ChildItem -Path "extracted" -Recurse -Filter "Everything.dll" | Select-Object -First 1
+          
+          if ($dll64) {
+              Copy-Item -Path $dll64.FullName -Destination ".." -Force
+              Write-Host "已复制 Everything64.dll"
+          } else {
+              Write-Host "未找到 Everything64.dll，跳过"
+          }
+          
+          if ($dll32) {
+              Copy-Item -Path $dll32.FullName -Destination ".." -Force
+              Write-Host "已复制 Everything.dll"
+          } else {
+              Write-Host "未找到 Everything.dll，跳过"
+          }
           
           cd ..
           Remove-Item -Recurse -Force temp_everything
