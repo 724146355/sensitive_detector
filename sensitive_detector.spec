@@ -12,7 +12,15 @@
 #
 
 import sys
-from pathlib import Path
+
+try:
+    from PyInstaller.utils.win32.versioninfo import (
+        VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable, StringStruct,
+        VarFileInfo, VarStruct
+    )
+    _has_versioninfo = True
+except ImportError:
+    _has_versioninfo = False
 
 block_cipher = None
 
@@ -66,16 +74,37 @@ excludes = [
 # ---------------------------------------------------------------------------
 # Windows 版本信息（右键 EXE → 属性 → 详细信息可见）
 # ---------------------------------------------------------------------------
-version_info = {
-    'FileDescription': '敏感文件扫描与加密备份工具',
-    'ProductName': 'SensitiveDetector',
-    'CompanyName': '',
-    'FileVersion': '1.0.0',
-    'ProductVersion': '1.0.0',
-    'InternalName': 'SensitiveDetector',
-    'LegalCopyright': '',
-    'OriginalFilename': 'SensitiveDetector.exe',
-}
+if _has_versioninfo:
+    version_info = VSVersionInfo(
+        ffi=FixedFileInfo(
+            filevers=(1, 0, 0, 0),
+            prodvers=(1, 0, 0, 0),
+            mask=0x3F,
+            flags=0x0,
+            OS=0x40004,
+            fileType=0x1,
+            subtype=0x0,
+            date=(0, 0)
+        ),
+        kids=[
+            StringFileInfo([
+                StringTable(
+                    '040904B0',
+                    [StringStruct('FileDescription', '敏感文件扫描与加密备份工具'),
+                     StringStruct('ProductName', 'SensitiveDetector'),
+                     StringStruct('CompanyName', ''),
+                     StringStruct('FileVersion', '1.0.0'),
+                     StringStruct('ProductVersion', '1.0.0'),
+                     StringStruct('InternalName', 'SensitiveDetector'),
+                     StringStruct('LegalCopyright', ''),
+                     StringStruct('OriginalFilename', 'SensitiveDetector.exe')]
+                )
+            ]),
+            VarFileInfo([VarStruct('Translation', [1033, 1200])])
+        ]
+    )
+else:
+    version_info = None
 
 # ---------------------------------------------------------------------------
 # 构建分析
