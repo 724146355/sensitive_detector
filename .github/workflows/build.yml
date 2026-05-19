@@ -19,10 +19,11 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v6
 
-      - name: 设置 Python 3.12
+      - name: 设置 Python 3.12 (32位)
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          architecture: "x86"
           cache: "pip"
 
       - name: 安装项目依赖
