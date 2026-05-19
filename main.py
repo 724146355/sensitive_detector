@@ -74,14 +74,17 @@ def main():
 
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
-        bundled_path = os.path.join(sys._MEIPASS, "config.json") if hasattr(sys, '_MEIPASS') else None
         user_config = os.path.join(exe_dir, "config.json")
-        if os.path.exists(user_config):
-            config_path = user_config
-        elif bundled_path and os.path.exists(bundled_path):
-            config_path = bundled_path
-        else:
-            config_path = user_config
+        bundled_path = os.path.join(sys._MEIPASS, "config.json") if hasattr(sys, '_MEIPASS') else None
+        if not os.path.exists(user_config) and bundled_path and os.path.exists(bundled_path):
+            try:
+                import shutil
+                shutil.copy2(bundled_path, user_config)
+                logger.info(f"已导出默认配置文件到: {user_config}")
+                logger.info(f"用户可编辑此文件自定义检测规则")
+            except Exception as e:
+                logger.warning(f"导出配置文件失败: {e}")
+        config_path = user_config
     else:
         base_path = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(base_path, "config.json")
