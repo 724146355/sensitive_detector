@@ -352,16 +352,25 @@ class EverythingScanner:
         self.logger.debug(f"  Everything 查询: {query}")
 
         # --- 执行查询 ---
-        dll.Everything_SetSearchW(query)
-        dll.Everything_SetRequestFlags(
-            EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME | EVERYTHING_REQUEST_SIZE
-        )
+        try:
+            dll.Everything_SetSearchW(query)
+            
+            # 根据 DLL 支持的功能动态设置请求标志
+            request_flags = EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME
+            if self._has_get_size_func:
+                request_flags |= EVERYTHING_REQUEST_SIZE
+            
+            dll.Everything_SetRequestFlags(request_flags)
 
-        if not dll.Everything_QueryW(True):
-            error_code = dll.Everything_GetLastError()
-            error_msg = ERROR_MESSAGES.get(error_code, f"未知错误 ({error_code})")
-            self.logger.warning(f"  Everything 查询失败: {error_msg}")
-            return None  # 返回 None 表示查询失败，应由调用方触发回退
+            if not dll.Everything_QueryW(True):
+                error_code = dll.Everything_GetLastError()
+                error_msg = ERROR_MESSAGES.get(error_code, f"未知错误 ({error_code})")
+                self.logger.warning(f"  Everything 查询失败: {error_msg}")
+                return None  # 返回 None 表示查询失败，应由调用方触发回退
+        except Exception as e:
+            self.logger.error(f"  Everything 查询异常: {type(e).__name__}: {e}")
+            self.logger.warning(f"  可能原因: DLL 版本不兼容或函数签名不匹配")
+            return None
 
         num_results = dll.Everything_GetNumResults()
         self.logger.debug(f"  Everything 原始结果数: {num_results}")
@@ -376,32 +385,36 @@ class EverythingScanner:
         oversized_count = 0
 
         for i in range(num_results):
-            # 获取完整路径 (UTF-16)
-            buf_size = 4096  # 远大于 MAX_PATH，支持长路径
-            buf = ctypes.create_unicode_buffer(buf_size)
-            dll.Everything_GetResultFullPathNameW(i, buf, buf_size)
-            full_path = buf.value
+            try:
+                # 获取完整路径 (UTF-16)
+                buf_size = 4096  # 远大于 MAX_PATH，支持长路径
+                buf = ctypes.create_unicode_buffer(buf_size)
+                dll.Everything_GetResultFullPathNameW(i, buf, buf_size)
+                full_path = buf.value
 
-            if not full_path:
+                if not full_path:
+                    continue
+
+                # 跳过目录（向后兼容：旧版本 DLL 没有 Everything_IsFolder 函数）
+                if self._has_is_folder_func:
+                    if dll.Everything_IsFolder(i):
+                        continue
+                else:
+                    # 旧版本 DLL：通过路径末尾是否有反斜杠判断是否为文件夹
+                    if full_path.endswith('\\'):
+                        continue
+
+                # 大小过滤（可选，向后兼容）
+                if max_size_bytes is not None and self._has_get_size_func:
+                    file_size = dll.Everything_GetResultSize(i)
+                    if file_size > max_size_bytes:
+                        oversized_count += 1
+                        continue
+
+                results.append(full_path)
+            except Exception as e:
+                self.logger.debug(f"  处理第 {i} 个结果时异常: {type(e).__name__}: {e}")
                 continue
-
-            # 跳过目录（向后兼容：旧版本 DLL 没有 Everything_IsFolder 函数）
-            if self._has_is_folder_func:
-                if dll.Everything_IsFolder(i):
-                    continue
-            else:
-                # 旧版本 DLL：通过路径末尾是否有反斜杠判断是否为文件夹
-                if full_path.endswith('\\'):
-                    continue
-
-            # 大小过滤（可选，向后兼容）
-            if max_size_bytes is not None and self._has_get_size_func:
-                file_size = dll.Everything_GetResultSize(i)
-                if file_size > max_size_bytes:
-                    oversized_count += 1
-                    continue
-
-            results.append(full_path)
 
             # 进度日志
             if progress_interval > 0 and (i + 1) % progress_interval == 0:
