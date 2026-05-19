@@ -53,7 +53,7 @@ class EverythingScanner:
         scanner = EverythingScanner()
         if scanner.available:
             files = scanner.find_files(
-                paths=["C:\\", "D:\\"],
+                paths=["C:\\\\", "D:\\\\"],
                 extensions={".doc", ".docx", ".xlsx"},
                 max_size_bytes=100 * 1024 * 1024
             )
@@ -63,8 +63,10 @@ class EverythingScanner:
         self.logger = Logger()
         self._dll = None
         self._available = False
-        self._has_is_folder_func = False  # 标记是否有 Everything_IsFolder 函数
-        self._has_get_size_func = False    # 标记是否有 Everything_GetResultSize 函数
+        self._has_is_folder_func = False  # 标记是否有 Everything_IsFolderResult 函数
+        self._has_is_file_func = False    # 标记是否有 Everything_IsFileResult 函数
+        self._has_get_size_func = False   # 标记是否有 Everything_GetResultSize 函数
+        self._has_match_path_func = False # 标记是否有 Everything_SetMatchPath 函数
         self._load_dll()
 
     # ----------------------------------------------------------
@@ -164,7 +166,13 @@ class EverythingScanner:
         return dirs
 
     def _setup_funcs(self):
-        """配置 DLL 函数签名（显式声明参数和返回类型）"""
+        """配置 DLL 函数签名（显式声明参数和返回类型）
+
+        重要：函数名必须与 Everything SDK 官方文档一致！
+        - Everything_IsFolderResult（不是 Everything_IsFolder）
+        - Everything_IsFileResult
+        - Everything_GetResultSize 需要传指针参数
+        """
         dll = self._dll
 
         # void Everything_SetSearchW(LPCWSTR lpSearchString)
@@ -174,6 +182,18 @@ class EverythingScanner:
         # void Everything_SetRequestFlags(DWORD dwRequestFlags)
         dll.Everything_SetRequestFlags.argtypes = [wintypes.DWORD]
         dll.Everything_SetRequestFlags.restype = None
+
+        # void Everything_SetMatchPath(BOOL bEnable)
+        # 重要：默认 Match Path = OFF，路径搜索词只匹配文件名不匹配路径
+        # 必须启用才能让 "C:\\" 这样的路径过滤生效
+        if hasattr(dll, 'Everything_SetMatchPath'):
+            dll.Everything_SetMatchPath.argtypes = [wintypes.BOOL]
+            dll.Everything_SetMatchPath.restype = None
+            self._has_match_path_func = True
+            self.logger.debug("DLL 支持 Everything_SetMatchPath 函数")
+        else:
+            self._has_match_path_func = False
+            self.logger.warning("DLL 不支持 Everything_SetMatchPath，将使用 path: 修饰符替代")
 
         # BOOL Everything_QueryW(BOOL bWait)
         dll.Everything_QueryW.argtypes = [wintypes.BOOL]
@@ -191,25 +211,46 @@ class EverythingScanner:
         ]
         dll.Everything_GetResultFullPathNameW.restype = wintypes.DWORD
 
-        # ULONGLONG Everything_GetResultSize(DWORD nIndex) - 向后兼容：旧版本 DLL 可能没有此函数
+        # BOOL Everything_GetResultSize(DWORD dwIndex, LARGE_INTEGER *lpSize)
+        # 重要：此函数通过指针参数返回大小值，而不是通过返回值！
+        # 签名: BOOL Everything_GetResultSize(DWORD index, LARGE_INTEGER *lpSize)
         if hasattr(dll, 'Everything_GetResultSize'):
-            dll.Everything_GetResultSize.argtypes = [wintypes.DWORD]
-            dll.Everything_GetResultSize.restype = ctypes.c_ulonglong
+            dll.Everything_GetResultSize.argtypes = [
+                wintypes.DWORD,
+                ctypes.POINTER(ctypes.c_ulonglong)
+            ]
+            dll.Everything_GetResultSize.restype = wintypes.BOOL
             self._has_get_size_func = True
             self.logger.debug("DLL 支持 Everything_GetResultSize 函数")
         else:
             self._has_get_size_func = False
             self.logger.warning("DLL 版本较旧，不支持 Everything_GetResultSize 函数，将跳过大小过滤")
 
-        # BOOL Everything_IsFolder(DWORD nIndex) - 向后兼容：旧版本 DLL 可能没有此函数
-        if hasattr(dll, 'Everything_IsFolder'):
-            dll.Everything_IsFolder.argtypes = [wintypes.DWORD]
-            dll.Everything_IsFolder.restype = wintypes.BOOL
+        # BOOL Everything_IsFolderResult(DWORD index)
+        # 重要：正确函数名是 Everything_IsFolderResult，不是 Everything_IsFolder！
+        if hasattr(dll, 'Everything_IsFolderResult'):
+            dll.Everything_IsFolderResult.argtypes = [wintypes.DWORD]
+            dll.Everything_IsFolderResult.restype = wintypes.BOOL
             self._has_is_folder_func = True
-            self.logger.debug("DLL 支持 Everything_IsFolder 函数")
+            self.logger.debug("DLL 支持 Everything_IsFolderResult 函数")
         else:
             self._has_is_folder_func = False
-            self.logger.warning("DLL 版本较旧，不支持 Everything_IsFolder 函数，将使用路径判断方式")
+            self.logger.warning("DLL 版本较旧，不支持 Everything_IsFolderResult 函数，将使用路径判断方式")
+
+        # BOOL Everything_IsFileResult(DWORD index)
+        if hasattr(dll, 'Everything_IsFileResult'):
+            dll.Everything_IsFileResult.argtypes = [wintypes.DWORD]
+            dll.Everything_IsFileResult.restype = wintypes.BOOL
+            self._has_is_file_func = True
+            self.logger.debug("DLL 支持 Everything_IsFileResult 函数")
+        else:
+            self._has_is_file_func = False
+            self.logger.debug("DLL 不支持 Everything_IsFileResult 函数，将使用 IsFolderResult 替代")
+
+        # void Everything_Reset(void)
+        if hasattr(dll, 'Everything_Reset'):
+            dll.Everything_Reset.argtypes = []
+            dll.Everything_Reset.restype = None
 
         # DWORD Everything_GetLastError(void)
         dll.Everything_GetLastError.argtypes = []
@@ -334,34 +375,50 @@ class EverythingScanner:
 
     def _execute_query(self, path, ext_str, max_size_bytes):
         """执行单次 Everything 查询
-
+    
         Returns:
             list[str]: 文件路径列表
             None: 查询失败（Everything 服务未运行等），应由调用方触发回退
         """
         dll = self._dll
-
+    
+        # 重置查询状态（防止上一次查询的设置影响本次）
+        if hasattr(dll, 'Everything_Reset'):
+            dll.Everything_Reset()
+    
         # 构建查询字符串
-        # Everything 语法: "C:\Path\" ext:doc;docx;xlsx
+        # Everything 语法: "C:\\Path\\" ext:doc;docx;xlsx
+        # 当 Everything_SetMatchPath 不可用时，使用 path: 修饰符强制路径匹配
         normalized_path = self._normalize_path(path)
         query_parts = [f"ext:{ext_str}"]
         if normalized_path:
-            query_parts.insert(0, f'"{normalized_path}"')
+            if self._has_match_path_func:
+                # SetMatchPath 可用：路径过滤通过全局路径匹配生效
+                query_parts.insert(0, f'"{normalized_path}"')
+            else:
+                # SetMatchPath 不可用：使用 path: 修饰符强制该搜索词匹配路径
+                query_parts.insert(0, f'path:"{normalized_path}"')
         query = " ".join(query_parts)
-
+    
         self.logger.debug(f"  Everything 查询: {query}")
-
+    
         # --- 执行查询 ---
         try:
             dll.Everything_SetSearchW(query)
-            
+    
+            # 关键：启用路径匹配！
+            # SDK 默认 Match Path = OFF，搜索词只匹配文件名
+            # 必须启用才能让 "C:\\" 这样的路径过滤生效，否则所有路径搜索返回0结果
+            if self._has_match_path_func:
+                dll.Everything_SetMatchPath(True)
+    
             # 根据 DLL 支持的功能动态设置请求标志
             request_flags = EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME
             if self._has_get_size_func:
                 request_flags |= EVERYTHING_REQUEST_SIZE
-            
+    
             dll.Everything_SetRequestFlags(request_flags)
-
+    
             if not dll.Everything_QueryW(True):
                 error_code = dll.Everything_GetLastError()
                 error_msg = ERROR_MESSAGES.get(error_code, f"未知错误 ({error_code})")
@@ -371,19 +428,19 @@ class EverythingScanner:
             self.logger.error(f"  Everything 查询异常: {type(e).__name__}: {e}")
             self.logger.warning(f"  可能原因: DLL 版本不兼容或函数签名不匹配")
             return None
-
+    
         num_results = dll.Everything_GetNumResults()
         self.logger.debug(f"  Everything 原始结果数: {num_results}")
-
+    
         if num_results == 0:
             return []
-
+    
         # --- 收集结果 ---
         results = []
         # 每处理 N 个文件打一次进度日志（避免刷屏）
         progress_interval = max(10000, num_results // 5) if num_results > 10000 else 0
         oversized_count = 0
-
+    
         for i in range(num_results):
             try:
                 # 获取完整路径 (UTF-16)
@@ -391,38 +448,47 @@ class EverythingScanner:
                 buf = ctypes.create_unicode_buffer(buf_size)
                 dll.Everything_GetResultFullPathNameW(i, buf, buf_size)
                 full_path = buf.value
-
+    
                 if not full_path:
                     continue
-
-                # 跳过目录（向后兼容：旧版本 DLL 没有 Everything_IsFolder 函数）
-                if self._has_is_folder_func:
-                    if dll.Everything_IsFolder(i):
+    
+                # 跳过目录：优先使用 IsFileResult/IsFolderResult
+                if self._has_is_file_func:
+                    # 最可靠的方式：只保留文件结果
+                    if not dll.Everything_IsFileResult(i):
+                        continue
+                elif self._has_is_folder_func:
+                    # 使用 IsFolderResult 排除文件夹
+                    if dll.Everything_IsFolderResult(i):
                         continue
                 else:
                     # 旧版本 DLL：通过路径末尾是否有反斜杠判断是否为文件夹
                     if full_path.endswith('\\'):
                         continue
-
+    
                 # 大小过滤（可选，向后兼容）
                 if max_size_bytes is not None and self._has_get_size_func:
-                    file_size = dll.Everything_GetResultSize(i)
-                    if file_size > max_size_bytes:
-                        oversized_count += 1
-                        continue
-
+                    file_size = ctypes.c_ulonglong(0)
+                    if dll.Everything_GetResultSize(i, ctypes.byref(file_size)):
+                        if file_size.value > max_size_bytes:
+                            oversized_count += 1
+                            continue
+                    else:
+                        # 获取大小失败，跳过大小过滤，保留该文件
+                        self.logger.debug(f"  获取文件大小失败，跳过大小过滤: {full_path}")
+    
                 results.append(full_path)
             except Exception as e:
                 self.logger.debug(f"  处理第 {i} 个结果时异常: {type(e).__name__}: {e}")
                 continue
-
+    
             # 进度日志
             if progress_interval > 0 and (i + 1) % progress_interval == 0:
                 pct = min((i + 1) * 100 // num_results, 100)
                 self.logger.info(f"  Everything 扫描进度: {pct}% ({i + 1}/{num_results})")
-
+    
         # 统计信息
         if oversized_count > 0:
             self.logger.debug(f"  Everything 过滤了 {oversized_count} 个超大文件")
-
+    
         return results
