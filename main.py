@@ -1,6 +1,8 @@
 import os
 import sys
+import json
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from logger import Logger
 from config_loader import ConfigLoader
@@ -71,8 +73,6 @@ def resolve_target_paths():
 def process_single_file(file_path, scanner, matcher, skip_size_check):
     """处理单个文件：提取文本 + 敏感检测
 
-    使用增量提取+匹配模式，边提取边检测，达到阈值立即停止。
-
     Args:
         file_path: 文件路径
         scanner: FileScanner 实例
@@ -84,7 +84,6 @@ def process_single_file(file_path, scanner, matcher, skip_size_check):
     """
     start = time.monotonic()
     try:
-        # 使用增量提取+匹配（核心优化：边提取边检测，达到阈值立即停止）
         is_sensitive, details, size_mb = scanner.extract_and_match(file_path, matcher)
         elapsed_ms = (time.monotonic() - start) * 1000
         return file_path, is_sensitive, details, size_mb, elapsed_ms
@@ -101,22 +100,49 @@ def main():
     logger.info("多格式文件敏感检测工具启动")
     logger.info("=" * 60)
 
+    # ----------------------------------------------------------
+    # 配置文件处理：对比本地与程序内置属性数量
+    #   - 本地属性少于内置 → 删除本地，以程序为准重新生成
+    #   - 本地属性多于或等于内置 → 保留本地（用户自定义内容）
+    #   - 本地不存在 → 直接生成默认配置
+    # ----------------------------------------------------------
+    from config_loader import CONFIG_DEFAULT
+
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
-        user_config = os.path.join(exe_dir, "config.json")
-        bundled_path = os.path.join(sys._MEIPASS, "config.json") if hasattr(sys, '_MEIPASS') else None
-        if not os.path.exists(user_config) and bundled_path and os.path.exists(bundled_path):
-            try:
-                import shutil
-                shutil.copy2(bundled_path, user_config)
-                logger.info(f"已导出默认配置文件到: {user_config}")
-                logger.info(f"用户可编辑此文件自定义检测规则")
-            except Exception as e:
-                logger.warning(f"导出配置文件失败: {e}")
-        config_path = user_config
+        config_path = os.path.join(exe_dir, "config.json")
     else:
         base_path = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(base_path, "config.json")
+
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                local_config = json.load(f)
+            local_keys = set(local_config.keys())
+            builtin_keys = set(CONFIG_DEFAULT.keys())
+
+            # 本地缺少的属性
+            missing_keys = builtin_keys - local_keys
+            if missing_keys:
+                logger.info(f"本地配置缺少属性: {', '.join(sorted(missing_keys))}")
+                logger.info(f"删除本地配置，以程序内置配置为准")
+                try:
+                    os.remove(config_path)
+                except OSError as e:
+                    logger.warning(f"删除本地配置文件失败: {e}")
+            else:
+                logger.info(f"读取配置文件: {config_path}")
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"本地配置文件损坏: {e}")
+            logger.info(f"删除损坏的配置文件，以程序内置配置为准")
+            try:
+                os.remove(config_path)
+            except OSError:
+                pass
+    else:
+        logger.info(f"配置文件不存在，将创建默认配置: {config_path}")
+
     config_loader = ConfigLoader(config_path)
 
     try:
@@ -133,10 +159,12 @@ def main():
     default_max_size = config_loader.get_max_file_size()
     match_threshold = config_loader.get_match_threshold()
     backup_base_path = config_loader.get_backup_base_path()
+    dev_mode = config_loader.get_dev_mode()
 
     logger.info(f"默认文件大小阈值: {default_max_size}MB")
     logger.info(f"正则匹配阈值: {match_threshold}次")
     logger.info(f"备份基路径: {backup_base_path or '(未配置)'}")
+    logger.info(f"运行模式: {'开发模式(仅复制)' if dev_mode else '正式模式(剪切)'}")
 
     logger.info("-" * 60)
     logger.info("请输入启动参数")
@@ -154,12 +182,15 @@ def main():
     max_size_bytes = effective_max_size * 1024 * 1024
     scanner = FileScanner(max_size_bytes)
     matcher = Matcher(compiled_rules, match_threshold)
-    mover = FileMover(backup_base_path)
+    mover = FileMover(backup_base_path, dev_mode=dev_mode)
     archiver = Archiver()
 
+    # ----------------------------------------------------------
+    # 文件扫描阶段
+    # ----------------------------------------------------------
     target_files = []
     everything = EverythingScanner()
-    everything_filtered_size = False  # 标记 Everything 是否已按大小过滤
+    everything_filtered_size = False
 
     if everything.available:
         everything_files = everything.find_files(
@@ -167,9 +198,8 @@ def main():
         )
         if everything_files is not None:
             target_files = everything_files
-            everything_filtered_size = everything._has_get_size_func  # 有大小过滤功能时跳过重复检查
+            everything_filtered_size = everything._has_get_size_func
 
-    # 回退方案：当 Everything 不可用或查询全部失败时，使用 Python os.walk
     if not everything.available or (everything.available and everything_files is None):
         if not everything.available:
             logger.info("使用 Python 标准扫描（os.walk）作为回退方案...")
@@ -178,7 +208,6 @@ def main():
         for path in target_paths:
             target_files.extend(scanner.scan_directory(path))
     elif not target_files:
-        # Everything 成功执行但未找到任何文件（可靠结果，不再回退）
         pass
 
     if not target_files:
@@ -187,27 +216,32 @@ def main():
         input("按回车键退出...")
         return
 
-    sensitive_files = []
+    # ----------------------------------------------------------
+    # 检测前：先创建日期文件夹
+    # ----------------------------------------------------------
+    date_folder = mover.create_date_folder()
+    logger.info(f"备份目录: {date_folder}")
+
+    transferred_files = []  # 已复制/剪切的文件目标路径
+    transferred_lock = threading.Lock()  # 线程安全锁
 
     # ----------------------------------------------------------
-    # 并发检测：使用线程池并行处理文件
-    # 文本提取是 I/O 密集型（读文件）+ CPU 密集型（解析文档）
-    # 线程池可以让 I/O 等待和 CPU 计算重叠，大幅提升吞吐
+    # 并发检测 + 命中即复制/剪切
     # ----------------------------------------------------------
-    num_workers = min(os.cpu_count() or 4, 8)  # 最多 8 线程，避免过多竞争
+    num_workers = min(os.cpu_count() or 4, 8)
     total_files = len(target_files)
 
     logger.info("-" * 60)
     logger.info("开始文件敏感检测（并发模式）")
     logger.info(f"并发线程数: {num_workers}")
+    logger.info(f"命中操作: {'复制' if dev_mode else '剪切'}")
 
     completed_count = 0
-    skipped_count = 0     # 快速通过的安全文件计数（<=200ms）
-    SILENT_THRESHOLD_MS = 200  # 200ms 以内的安全文件不打详情
-    last_progress_pct = -1  # 上次打印进度条时的百分比
+    skipped_count = 0
+    SILENT_THRESHOLD_MS = 200
+    last_progress_pct = -1
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # 提交所有文件处理任务
         future_to_file = {
             executor.submit(
                 process_single_file, fp, scanner, matcher, everything_filtered_size
@@ -215,21 +249,25 @@ def main():
             for fp in target_files
         }
 
-        # 按完成顺序收集结果
         for future in as_completed(future_to_file):
             file_path, is_sensitive, details, size_mb, elapsed_ms = future.result()
             completed_count += 1
 
-            # --- 敏感文件：始终完整打印 ---
+            # --- 敏感文件：打印 + 立即复制/剪切 ---
             if is_sensitive:
-                sensitive_files.append(file_path)
                 logger.info(f"[{completed_count}/{total_files}] {file_path}")
                 logger.info(f"  判定结果: [敏感文件] ({elapsed_ms:.0f}ms)")
                 for d in details:
                     logger.info(f"    匹配规则: {d['rule_name']} (匹配 {d['match_count']} 次)")
+
+                # 命中即复制/剪切到备份目录
+                dest_path = mover.transfer_file(file_path, date_folder)
+                if dest_path:
+                    with transferred_lock:
+                        transferred_files.append(dest_path)
                 continue
 
-            # --- 异常/超限文件：简要打印 ---
+            # --- 异常/超限文件 ---
             if size_mb < 0:
                 logger.info(f"[{completed_count}/{total_files}] 跳过（无法获取大小）: {file_path}")
                 continue
@@ -237,15 +275,13 @@ def main():
                 logger.info(f"[{completed_count}/{total_files}] 跳过（超出大小阈值 {size_mb:.2f}MB）: {file_path}")
                 continue
 
-            # --- 安全文件：快速通过的不打详情，只显示进度条 ---
+            # --- 安全文件 ---
             if elapsed_ms <= SILENT_THRESHOLD_MS:
                 skipped_count += 1
             else:
-                # 慢文件打印详情，方便排查性能瓶颈
                 logger.info(f"[{completed_count}/{total_files}] {file_path}")
                 logger.info(f"  判定结果: [安全文件] ({elapsed_ms:.0f}ms, {size_mb:.2f}MB)")
 
-            # 进度条：每增加 5% 打印一次
             pct = completed_count * 100 // total_files
             if pct >= last_progress_pct + 5:
                 last_progress_pct = pct
@@ -255,44 +291,38 @@ def main():
         logger.info(f"其中 {skipped_count} 个文件快速通过（<{SILENT_THRESHOLD_MS}ms）")
 
     logger.info("-" * 60)
-    logger.info(f"检测完成，共发现 {len(sensitive_files)} 个敏感文件")
+    logger.info(f"检测完成，共发现 {len(transferred_files)} 个敏感文件")
 
-    if not sensitive_files:
+    if not transferred_files:
         logger.info("无需进行后续处理")
         input("按回车键退出...")
         return
 
+    # ----------------------------------------------------------
+    # 全部检测完成后：压缩所有已复制/剪切的敏感文件
+    # ----------------------------------------------------------
     logger.info("-" * 60)
-    logger.info("开始处理敏感文件")
-
-    date_folder = mover.create_date_folder()
-    logger.info(f"备份目录: {date_folder}")
-
-    moved_files = mover.move_files(sensitive_files, date_folder)
-
-    if not moved_files:
-        logger.error("文件迁移失败，无法进行压缩处理")
-        input("按回车键退出...")
-        return
+    logger.info("开始压缩敏感文件")
 
     if work_key:
         logger.info("工号Key已设置，执行加密压缩")
-        archive_path = archiver.create_archive(moved_files, date_folder, password=work_key)
+        archive_path = archiver.create_archive(transferred_files, date_folder, password=work_key)
         if archive_path:
             archiver.create_password_file(date_folder, work_key)
         else:
             logger.error("加密压缩失败")
     else:
         logger.info("工号Key为空，执行普通无加密压缩")
-        archive_path = archiver.create_archive(moved_files, date_folder)
+        archive_path = archiver.create_archive(transferred_files, date_folder)
 
     logger.info("=" * 60)
     logger.info("全部处理完成")
     logger.info(f"扫描路径数: {len(target_paths)}")
     for p in target_paths:
         logger.info(f"  扫描路径: {p}")
-    logger.info(f"敏感文件数: {len(sensitive_files)}")
+    logger.info(f"敏感文件数: {len(transferred_files)}")
     logger.info(f"备份位置: {date_folder}")
+    logger.info(f"运行模式: {'开发模式(仅复制)' if dev_mode else '正式模式(剪切)'}")
     if archive_path:
         logger.info(f"压缩包: {archive_path}")
 

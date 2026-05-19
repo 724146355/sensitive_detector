@@ -1,5 +1,6 @@
 import os
 import csv
+import importlib
 from logger import Logger
 
 SUPPORTED_EXTENSIONS = {
@@ -18,10 +19,14 @@ _cached_imports = {}
 
 
 def _lazy_import(module_name):
-    """延迟导入并缓存，仅在首次使用时真正 import"""
+    """延迟导入并缓存，仅在首次使用时真正 import
+
+    使用 importlib.import_module 替代 __import__，
+    对 fitz (PyMuPDF) 等包名与模块名不一致的库兼容性更好。
+    """
     if module_name not in _cached_imports:
         try:
-            _cached_imports[module_name] = __import__(module_name)
+            _cached_imports[module_name] = importlib.import_module(module_name)
         except ImportError:
             _cached_imports[module_name] = None
     return _cached_imports[module_name]
@@ -383,19 +388,35 @@ class FileScanner:
             return ""
 
     def _read_pdf(self, file_path):
-        """PDF 解析：优先使用 PyMuPDF (fitz)，回退到 pdfplumber
+        """PDF 解析：优先 PyMuPDF → pdfplumber → pypdf/PyPDF2，逐级回退
 
-        PyMuPDF 是 C 扩展实现，速度比 pdfplumber 快 5-10 倍
+        PyMuPDF (fitz): C 扩展，速度最快
+        pdfplumber: 纯 Python，解析精度高但慢
+        pypdf/PyPDF2: 纯 Python，速度适中，作为最终回退
         """
+        # 优先尝试 PyMuPDF
         fitz_mod = _lazy_import("fitz")
         if fitz_mod is not None:
             return self._read_pdf_fitz(file_path)
 
+        # 其次尝试 pdfplumber
         pdfplumber_mod = _lazy_import("pdfplumber")
         if pdfplumber_mod is not None:
             return self._read_pdf_pdfplumber(file_path)
 
-        self.logger.error("缺少 PyMuPDF (fitz) 或 pdfplumber 库，无法解析 .pdf 文件")
+        # 最后尝试 pypdf (新包名) 或 PyPDF2 (旧包名)
+        pypdf_mod = _lazy_import("pypdf")
+        if pypdf_mod is not None:
+            return self._read_pdf_pypdf(file_path)
+
+        pypdf2_mod = _lazy_import("PyPDF2")
+        if pypdf2_mod is not None:
+            return self._read_pdf_pypdf2(file_path)
+
+        self.logger.error(
+            "缺少 PDF 解析库，无法解析 .pdf 文件。"
+            "请安装以下任一库: pip install PyMuPDF / pip install pdfplumber / pip install pypdf"
+        )
         return ""
 
     def _read_pdf_fitz(self, file_path):
@@ -797,7 +818,7 @@ class FileScanner:
             return False, [], size_mb
 
     def _read_pdf_incremental(self, file_path, matcher, size_mb):
-        """PDF 增量提取+匹配：优先 PyMuPDF，回退 pdfplumber"""
+        """PDF 增量提取+匹配：优先 PyMuPDF → pdfplumber → pypdf/PyPDF2"""
         fitz_mod = _lazy_import("fitz")
         if fitz_mod is not None:
             return self._read_pdf_fitz_incremental(file_path, matcher, size_mb)
@@ -806,7 +827,19 @@ class FileScanner:
         if pdfplumber_mod is not None:
             return self._read_pdf_pdfplumber_incremental(file_path, matcher, size_mb)
 
-        self.logger.error("缺少 PyMuPDF (fitz) 或 pdfplumber 库，无法解析 .pdf 文件")
+        # pypdf/PyPDF2 增量提取
+        pypdf_mod = _lazy_import("pypdf")
+        if pypdf_mod is not None:
+            return self._read_pdf_pypdf_incremental(file_path, matcher, size_mb)
+
+        pypdf2_mod = _lazy_import("PyPDF2")
+        if pypdf2_mod is not None:
+            return self._read_pdf_pypdf2_incremental(file_path, matcher, size_mb)
+
+        self.logger.error(
+            "缺少 PDF 解析库，无法解析 .pdf 文件。"
+            "请安装以下任一库: pip install PyMuPDF / pip install pdfplumber / pip install pypdf"
+        )
         return False, [], size_mb
 
     def _read_pdf_fitz_incremental(self, file_path, matcher, size_mb):
@@ -858,6 +891,52 @@ class FileScanner:
             self.logger.warning(f"PyMuPDF 增量解析失败，回退: {file_path} - {e}")
             return self._read_pdf_pdfplumber_incremental(file_path, matcher, size_mb)
 
+    def _read_pdf_pypdf(self, file_path):
+        """使用 pypdf 解析 PDF（第三回退方案）"""
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            content = []
+            line_count = 0
+            for page in reader.pages:
+                if line_count >= 10000:
+                    break
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        if line_count >= 10000:
+                            break
+                        if line.strip():
+                            content.append(line.strip())
+                            line_count += 1
+            return "\n".join(content)
+        except Exception as e:
+            self.logger.warning(f"pypdf 解析失败: {file_path} - {e}")
+            return ""
+
+    def _read_pdf_pypdf2(self, file_path):
+        """使用 PyPDF2 解析 PDF（最终回退方案，旧版包名）"""
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(file_path)
+            content = []
+            line_count = 0
+            for page in reader.pages:
+                if line_count >= 10000:
+                    break
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        if line_count >= 10000:
+                            break
+                        if line.strip():
+                            content.append(line.strip())
+                            line_count += 1
+            return "\n".join(content)
+        except Exception as e:
+            self.logger.warning(f"PyPDF2 解析失败: {file_path} - {e}")
+            return ""
+
     def _read_pdf_pdfplumber_incremental(self, file_path, matcher, size_mb):
         """使用 pdfplumber 增量提取+匹配（回退方案）"""
         try:
@@ -903,4 +982,98 @@ class FileScanner:
             return is_sensitive, details, size_mb
         except Exception as e:
             self.logger.warning(f"PDF 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
+
+    def _read_pdf_pypdf_incremental(self, file_path, matcher, size_mb):
+        """使用 pypdf 增量提取+匹配"""
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 10
+            line_count = 0
+
+            for page in reader.pages:
+                if line_count >= 10000:
+                    break
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        if line_count >= 10000:
+                            break
+                        if line.strip():
+                            chunk_parts.append(line.strip())
+                            chunk_size += 1
+                            line_count += 1
+
+                if chunk_size >= CHUNK_THRESHOLD:
+                    chunk_text = "\n".join(chunk_parts)
+                    should_stop, accumulated = matcher.scan_text_incremental(
+                        chunk_text, accumulated
+                    )
+                    chunk_parts = []
+                    chunk_size = 0
+                    if should_stop:
+                        is_sensitive, details = matcher.get_match_details(accumulated)
+                        return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"pypdf 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
+
+    def _read_pdf_pypdf2_incremental(self, file_path, matcher, size_mb):
+        """使用 PyPDF2 增量提取+匹配（旧版包名）"""
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(file_path)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 10
+            line_count = 0
+
+            for page in reader.pages:
+                if line_count >= 10000:
+                    break
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        if line_count >= 10000:
+                            break
+                        if line.strip():
+                            chunk_parts.append(line.strip())
+                            chunk_size += 1
+                            line_count += 1
+
+                if chunk_size >= CHUNK_THRESHOLD:
+                    chunk_text = "\n".join(chunk_parts)
+                    should_stop, accumulated = matcher.scan_text_incremental(
+                        chunk_text, accumulated
+                    )
+                    chunk_parts = []
+                    chunk_size = 0
+                    if should_stop:
+                        is_sensitive, details = matcher.get_match_details(accumulated)
+                        return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"PyPDF2 增量解析失败: {file_path} - {e}")
             return False, [], size_mb

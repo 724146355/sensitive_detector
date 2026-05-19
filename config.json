@@ -15,5 +15,6 @@
     ],
     "max_file_size_mb": 100,
     "match_threshold": 3,
-    "backup_base_path": ".\\sensitive_backup"
+    "backup_base_path": ".\\sensitive_backup",
+    "dev": false
 }

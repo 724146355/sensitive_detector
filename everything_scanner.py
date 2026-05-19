@@ -332,8 +332,8 @@ class EverythingScanner:
             return None
 
         self.logger.info(f"Everything 扫描完成，共发现 {final_count} 个待检测文件")
-        for f in all_results:
-            self.logger.info(f"  待检测: {f}")
+        # for f in all_results:
+        #     self.logger.info(f"  待检测: {f}")
         self.logger.info("-" * 60)
 
         return all_results
