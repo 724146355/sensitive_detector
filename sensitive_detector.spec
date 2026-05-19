@@ -30,9 +30,6 @@ block_cipher = None
 # config.json 为内置默认配置；用户如需自定义，可将 config.json 放于 EXE 同目录
 added_files = [
     ('config.json', '.'),
-    # Everything SDK DLL 文件
-    ('Everything64.dll', '.'),
-    ('Everything.dll', '.'),
 ]
 
 # ---------------------------------------------------------------------------
