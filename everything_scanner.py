@@ -75,11 +75,11 @@ class EverythingScanner:
             self.logger.debug("EverythingScanner: 非 Windows 系统，不可用")
             return
 
-        # 根据 Python 架构选择对应 DLL
-        is_64bit = ctypes.sizeof(ctypes.c_void_p) == 8
-        dll_name = "Everything64.dll" if is_64bit else "Everything.dll"
-        bitness = "64-bit" if is_64bit else "32-bit"
-        self.logger.debug(f"EverythingScanner: 当前 Python 为 {bitness}，查找 {dll_name}")
+        # 强制使用 32 位 DLL（兼容 Windows XP 和 32/64 位系统）
+        # 注意：如果使用 64 位 Python 打包，需确保系统安装了 32 位 Everything DLL
+        dll_name = "Everything.dll"
+        bitness = "32-bit (强制)"
+        self.logger.debug(f"EverythingScanner: 强制使用 {bitness} DLL，查找 {dll_name}")
 
         search_dirs = self._get_search_dirs()
 
