@@ -63,6 +63,7 @@ class EverythingScanner:
         self.logger = Logger()
         self._dll = None
         self._available = False
+        self._has_is_folder_func = False  # 标记是否有 Everything_IsFolder 函数
         self._load_dll()
 
     # ----------------------------------------------------------
@@ -193,9 +194,15 @@ class EverythingScanner:
         dll.Everything_GetResultSize.argtypes = [wintypes.DWORD]
         dll.Everything_GetResultSize.restype = ctypes.c_ulonglong
 
-        # BOOL Everything_IsFolder(DWORD nIndex)
-        dll.Everything_IsFolder.argtypes = [wintypes.DWORD]
-        dll.Everything_IsFolder.restype = wintypes.BOOL
+        # BOOL Everything_IsFolder(DWORD nIndex) - 向后兼容：旧版本 DLL 可能没有此函数
+        if hasattr(dll, 'Everything_IsFolder'):
+            dll.Everything_IsFolder.argtypes = [wintypes.DWORD]
+            dll.Everything_IsFolder.restype = wintypes.BOOL
+            self._has_is_folder_func = True
+            self.logger.debug("DLL 支持 Everything_IsFolder 函数")
+        else:
+            self._has_is_folder_func = False
+            self.logger.warning("DLL 版本较旧，不支持 Everything_IsFolder 函数，将使用路径判断方式")
 
         # DWORD Everything_GetLastError(void)
         dll.Everything_GetLastError.argtypes = []
@@ -371,9 +378,14 @@ class EverythingScanner:
             if not full_path:
                 continue
 
-            # 跳过目录
-            if dll.Everything_IsFolder(i):
-                continue
+            # 跳过目录（向后兼容：旧版本 DLL 没有 Everything_IsFolder 函数）
+            if self._has_is_folder_func:
+                if dll.Everything_IsFolder(i):
+                    continue
+            else:
+                # 旧版本 DLL：通过路径末尾是否有反斜杠判断是否为文件夹
+                if full_path.endswith('\\'):
+                    continue
 
             # 大小过滤（可选）
             if max_size_bytes is not None:
