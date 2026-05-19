@@ -441,12 +441,13 @@ class EverythingScanner:
         progress_interval = max(10000, num_results // 5) if num_results > 10000 else 0
         oversized_count = 0
     
+        # 预分配 buffer，循环内复用，避免每个结果都重新分配内存
+        buf = ctypes.create_unicode_buffer(4096)  # 远大于 MAX_PATH，支持长路径
+    
         for i in range(num_results):
             try:
-                # 获取完整路径 (UTF-16)
-                buf_size = 4096  # 远大于 MAX_PATH，支持长路径
-                buf = ctypes.create_unicode_buffer(buf_size)
-                dll.Everything_GetResultFullPathNameW(i, buf, buf_size)
+                # 获取完整路径 (UTF-16)，复用 buffer
+                dll.Everything_GetResultFullPathNameW(i, buf, 4096)
                 full_path = buf.value
     
                 if not full_path:

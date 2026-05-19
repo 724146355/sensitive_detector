@@ -1,5 +1,7 @@
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from logger import Logger
 from config_loader import ConfigLoader
 from file_scanner import FileScanner, SUPPORTED_EXTENSIONS
@@ -66,6 +68,33 @@ def resolve_target_paths():
         return [os.path.abspath(target)]
 
 
+def process_single_file(file_path, scanner, matcher, skip_size_check):
+    """处理单个文件：提取文本 + 敏感检测
+
+    使用增量提取+匹配模式，边提取边检测，达到阈值立即停止。
+
+    Args:
+        file_path: 文件路径
+        scanner: FileScanner 实例
+        matcher: Matcher 实例
+        skip_size_check: 是否跳过大小检查（Everything 已过滤时为 True）
+
+    Returns:
+        (file_path, is_sensitive, details, size_mb, elapsed_ms)
+    """
+    start = time.monotonic()
+    try:
+        # 使用增量提取+匹配（核心优化：边提取边检测，达到阈值立即停止）
+        is_sensitive, details, size_mb = scanner.extract_and_match(file_path, matcher)
+        elapsed_ms = (time.monotonic() - start) * 1000
+        return file_path, is_sensitive, details, size_mb, elapsed_ms
+    except Exception as e:
+        elapsed_ms = (time.monotonic() - start) * 1000
+        logger = Logger()
+        logger.warning(f"文件处理异常: {file_path} - {e}")
+        return file_path, False, [], -1, elapsed_ms
+
+
 def main():
     logger = Logger()
     logger.info("=" * 60)
@@ -130,6 +159,7 @@ def main():
 
     target_files = []
     everything = EverythingScanner()
+    everything_filtered_size = False  # 标记 Everything 是否已按大小过滤
 
     if everything.available:
         everything_files = everything.find_files(
@@ -137,6 +167,7 @@ def main():
         )
         if everything_files is not None:
             target_files = everything_files
+            everything_filtered_size = everything._has_get_size_func  # 有大小过滤功能时跳过重复检查
 
     # 回退方案：当 Everything 不可用或查询全部失败时，使用 Python os.walk
     if not everything.available or (everything.available and everything_files is None):
@@ -158,32 +189,70 @@ def main():
 
     sensitive_files = []
 
+    # ----------------------------------------------------------
+    # 并发检测：使用线程池并行处理文件
+    # 文本提取是 I/O 密集型（读文件）+ CPU 密集型（解析文档）
+    # 线程池可以让 I/O 等待和 CPU 计算重叠，大幅提升吞吐
+    # ----------------------------------------------------------
+    num_workers = min(os.cpu_count() or 4, 8)  # 最多 8 线程，避免过多竞争
+    total_files = len(target_files)
+
     logger.info("-" * 60)
-    logger.info("开始文件敏感检测")
-    for idx, file_path in enumerate(target_files, 1):
-        logger.info(f"[{idx}/{len(target_files)}] 检测文件: {file_path}")
+    logger.info("开始文件敏感检测（并发模式）")
+    logger.info(f"并发线程数: {num_workers}")
 
-        is_over, size_mb = scanner.is_oversized(file_path)
-        if is_over:
-            logger.info(f"  跳过（超出大小阈值）")
-            continue
+    completed_count = 0
+    skipped_count = 0     # 快速通过的安全文件计数（<=200ms）
+    SILENT_THRESHOLD_MS = 200  # 200ms 以内的安全文件不打详情
+    last_progress_pct = -1  # 上次打印进度条时的百分比
 
-        logger.info(f"  文件大小: {size_mb:.2f}MB")
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # 提交所有文件处理任务
+        future_to_file = {
+            executor.submit(
+                process_single_file, fp, scanner, matcher, everything_filtered_size
+            ): fp
+            for fp in target_files
+        }
 
-        text = scanner.extract_text(file_path)
-        if not text:
-            logger.info(f"  文件为空或解析无内容")
-            continue
+        # 按完成顺序收集结果
+        for future in as_completed(future_to_file):
+            file_path, is_sensitive, details, size_mb, elapsed_ms = future.result()
+            completed_count += 1
 
-        is_sensitive, details = matcher.scan_text(text, file_path)
+            # --- 敏感文件：始终完整打印 ---
+            if is_sensitive:
+                sensitive_files.append(file_path)
+                logger.info(f"[{completed_count}/{total_files}] {file_path}")
+                logger.info(f"  判定结果: [敏感文件] ({elapsed_ms:.0f}ms)")
+                for d in details:
+                    logger.info(f"    匹配规则: {d['rule_name']} (匹配 {d['match_count']} 次)")
+                continue
 
-        if is_sensitive:
-            sensitive_files.append(file_path)
-            logger.info(f"  判定结果: [敏感文件]")
-            for d in details:
-                logger.info(f"    匹配规则: {d['rule_name']} (匹配 {d['match_count']} 次)")
-        else:
-            logger.info(f"  判定结果: [安全文件]")
+            # --- 异常/超限文件：简要打印 ---
+            if size_mb < 0:
+                logger.info(f"[{completed_count}/{total_files}] 跳过（无法获取大小）: {file_path}")
+                continue
+            if size_mb > effective_max_size and not everything_filtered_size:
+                logger.info(f"[{completed_count}/{total_files}] 跳过（超出大小阈值 {size_mb:.2f}MB）: {file_path}")
+                continue
+
+            # --- 安全文件：快速通过的不打详情，只显示进度条 ---
+            if elapsed_ms <= SILENT_THRESHOLD_MS:
+                skipped_count += 1
+            else:
+                # 慢文件打印详情，方便排查性能瓶颈
+                logger.info(f"[{completed_count}/{total_files}] {file_path}")
+                logger.info(f"  判定结果: [安全文件] ({elapsed_ms:.0f}ms, {size_mb:.2f}MB)")
+
+            # 进度条：每增加 5% 打印一次
+            pct = completed_count * 100 // total_files
+            if pct >= last_progress_pct + 5:
+                last_progress_pct = pct
+                logger.info(f"进度: {pct}% ({completed_count}/{total_files})")
+
+    if skipped_count > 0:
+        logger.info(f"其中 {skipped_count} 个文件快速通过（<{SILENT_THRESHOLD_MS}ms）")
 
     logger.info("-" * 60)
     logger.info(f"检测完成，共发现 {len(sensitive_files)} 个敏感文件")

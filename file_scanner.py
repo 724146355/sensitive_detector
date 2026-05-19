@@ -11,6 +11,21 @@ SUPPORTED_EXTENSIONS = {
     ".wps", ".et", ".dps"
 }
 
+# ============================================================
+# 模块级 import 缓存：避免每次调用方法时重复 import 查找
+# ============================================================
+_cached_imports = {}
+
+
+def _lazy_import(module_name):
+    """延迟导入并缓存，仅在首次使用时真正 import"""
+    if module_name not in _cached_imports:
+        try:
+            _cached_imports[module_name] = __import__(module_name)
+        except ImportError:
+            _cached_imports[module_name] = None
+    return _cached_imports[module_name]
+
 
 class FileScanner:
     def __init__(self, max_file_size_bytes):
@@ -29,12 +44,8 @@ class FileScanner:
                 if ext in SUPPORTED_EXTENSIONS:
                     full_path = os.path.join(dirpath, filename)
                     target_files.append(full_path)
-                else:
-                    self.logger.debug(f"跳过不支持的文件类型: {os.path.join(dirpath, filename)}")
 
         self.logger.info(f"扫描到 {len(target_files)} 个待检测文件")
-        for f in target_files:
-            self.logger.info(f"  待检测: {f}")
         return target_files
 
     def get_file_size_mb(self, file_path):
@@ -55,6 +66,7 @@ class FileScanner:
         return is_over, size_mb
 
     def extract_text(self, file_path):
+        """提取文件全部文本（原有接口，保持兼容）"""
         ext = os.path.splitext(file_path)[1].lower()
         try:
             if ext in (".txt", ".md", ".log"):
@@ -87,6 +99,57 @@ class FileScanner:
             self.logger.warning(f"文件解析失败 ({ext}): {file_path} - {e}")
             return ""
 
+    def extract_and_match(self, file_path, matcher):
+        """边提取边匹配：增量提取文本并实时检测，达到阈值立即停止提取
+
+        相比 extract_text + scan_text 的两阶段模式，此方法可以在提取过程中
+        一旦发现达到匹配阈值就立即终止，避免提取剩余无用文本。
+
+        Args:
+            file_path: 文件路径
+            matcher: Matcher 实例
+
+        Returns:
+            (is_sensitive, details, size_mb):
+                is_sensitive: 是否敏感
+                details: 匹配详情列表
+                size_mb: 文件大小(MB)
+        """
+        ext = os.path.splitext(file_path)[1].lower()
+
+        # 先检查文件大小
+        is_over, size_mb = self.is_oversized(file_path)
+        if is_over:
+            return False, [], size_mb
+
+        try:
+            if ext in (".txt", ".md", ".log"):
+                return self._read_plain_text_incremental(file_path, matcher, size_mb)
+            elif ext == ".docx":
+                return self._read_docx_incremental(file_path, matcher, size_mb)
+            elif ext == ".xlsx":
+                return self._read_xlsx_incremental(file_path, matcher, size_mb)
+            elif ext == ".xls":
+                return self._read_xls_incremental(file_path, matcher, size_mb)
+            elif ext == ".csv":
+                return self._read_csv_incremental(file_path, matcher, size_mb)
+            elif ext == ".pptx":
+                return self._read_pptx_incremental(file_path, matcher, size_mb)
+            elif ext == ".pdf":
+                return self._read_pdf_incremental(file_path, matcher, size_mb)
+            else:
+                # 其他格式回退到全量提取+匹配
+                text = self.extract_text(file_path)
+                is_sensitive, details = matcher.scan_text(text, file_path)
+                return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"文件解析失败 ({ext}): {file_path} - {e}")
+            return False, [], size_mb
+
+    # ----------------------------------------------------------
+    #  纯文本提取方法（保持原有逻辑）
+    # ----------------------------------------------------------
+
     def _read_plain_text(self, file_path):
         content = []
         try:
@@ -101,6 +164,10 @@ class FileScanner:
         return "".join(content)
 
     def _read_docx(self, file_path):
+        docx_mod = _lazy_import("docx")
+        if docx_mod is None:
+            self.logger.error("缺少 python-docx 库，无法解析 .docx 文件")
+            return ""
         try:
             from docx import Document
             doc = Document(file_path)
@@ -121,14 +188,15 @@ class FileScanner:
                     content.append(row_text)
                     line_count += 1
             return "\n".join(content)
-        except ImportError:
-            self.logger.error("缺少 python-docx 库，无法解析 .docx 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"docx 解析失败: {file_path} - {e}")
             return ""
 
     def _read_doc(self, file_path):
+        olefile_mod = _lazy_import("olefile")
+        if olefile_mod is None:
+            self.logger.error("缺少 olefile 库，无法解析 .doc 文件")
+            return ""
         try:
             import olefile
             if not olefile.isOleFile(file_path):
@@ -157,9 +225,6 @@ class FileScanner:
                 return "".join(text_parts)
             finally:
                 ole.close()
-        except ImportError:
-            self.logger.error("缺少 olefile 库，无法解析 .doc 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"doc 解析失败: {file_path} - {e}")
             return ""
@@ -172,6 +237,10 @@ class FileScanner:
         return str(value)
 
     def _read_xlsx(self, file_path):
+        openpyxl_mod = _lazy_import("openpyxl")
+        if openpyxl_mod is None:
+            self.logger.error("缺少 openpyxl 库，无法解析 .xlsx 文件")
+            return ""
         try:
             import openpyxl
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -189,14 +258,15 @@ class FileScanner:
                         line_count += 1
             wb.close()
             return "\n".join(content)
-        except ImportError:
-            self.logger.error("缺少 openpyxl 库，无法解析 .xlsx 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"xlsx 解析失败: {file_path} - {e}")
             return ""
 
     def _read_xls(self, file_path):
+        xlrd_mod = _lazy_import("xlrd")
+        if xlrd_mod is None:
+            self.logger.error("缺少 xlrd 库，无法解析 .xls/.et 文件")
+            return ""
         try:
             import xlrd
             wb = xlrd.open_workbook(file_path)
@@ -215,9 +285,6 @@ class FileScanner:
                         content.append(row_text)
                         line_count += 1
             return "\n".join(content)
-        except ImportError:
-            self.logger.error("缺少 xlrd 库，无法解析 .xls/.et 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"xls 解析失败: {file_path} - {e}")
             return ""
@@ -239,6 +306,10 @@ class FileScanner:
         return "\n".join(content)
 
     def _read_pptx(self, file_path):
+        pptx_mod = _lazy_import("pptx")
+        if pptx_mod is None:
+            self.logger.error("缺少 python-pptx 库，无法解析 .pptx 文件")
+            return ""
         try:
             from pptx import Presentation
             prs = Presentation(file_path)
@@ -268,14 +339,15 @@ class FileScanner:
                                 content.append(row_text)
                                 line_count += 1
             return "\n".join(content)
-        except ImportError:
-            self.logger.error("缺少 python-pptx 库，无法解析 .pptx 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"pptx 解析失败: {file_path} - {e}")
             return ""
 
     def _read_ppt(self, file_path):
+        olefile_mod = _lazy_import("olefile")
+        if olefile_mod is None:
+            self.logger.error("缺少 olefile 库，无法解析 .ppt/.dps 文件")
+            return ""
         try:
             import olefile
             if not olefile.isOleFile(file_path):
@@ -306,14 +378,52 @@ class FileScanner:
                 return "\n".join(content)
             finally:
                 ole.close()
-        except ImportError:
-            self.logger.error("缺少 olefile 库，无法解析 .ppt/.dps 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"ppt 解析失败: {file_path} - {e}")
             return ""
 
     def _read_pdf(self, file_path):
+        """PDF 解析：优先使用 PyMuPDF (fitz)，回退到 pdfplumber
+
+        PyMuPDF 是 C 扩展实现，速度比 pdfplumber 快 5-10 倍
+        """
+        fitz_mod = _lazy_import("fitz")
+        if fitz_mod is not None:
+            return self._read_pdf_fitz(file_path)
+
+        pdfplumber_mod = _lazy_import("pdfplumber")
+        if pdfplumber_mod is not None:
+            return self._read_pdf_pdfplumber(file_path)
+
+        self.logger.error("缺少 PyMuPDF (fitz) 或 pdfplumber 库，无法解析 .pdf 文件")
+        return ""
+
+    def _read_pdf_fitz(self, file_path):
+        """使用 PyMuPDF/fitz 解析 PDF（高性能，C 扩展）"""
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            content = []
+            line_count = 0
+            for page in doc:
+                if line_count >= 10000:
+                    break
+                text = page.get_text()
+                if text:
+                    for line in text.split("\n"):
+                        if line_count >= 10000:
+                            break
+                        if line.strip():
+                            content.append(line.strip())
+                            line_count += 1
+            doc.close()
+            return "\n".join(content)
+        except Exception as e:
+            self.logger.warning(f"PyMuPDF 解析失败，回退到 pdfplumber: {file_path} - {e}")
+            return self._read_pdf_pdfplumber(file_path)
+
+    def _read_pdf_pdfplumber(self, file_path):
+        """使用 pdfplumber 解析 PDF（回退方案，纯 Python）"""
         try:
             import pdfplumber
             content = []
@@ -331,14 +441,15 @@ class FileScanner:
                                 content.append(line.strip())
                                 line_count += 1
             return "\n".join(content)
-        except ImportError:
-            self.logger.error("缺少 pdfplumber 库，无法解析 .pdf 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"PDF 解析失败: {file_path} - {e}")
             return ""
 
     def _read_wps(self, file_path):
+        olefile_mod = _lazy_import("olefile")
+        if olefile_mod is None:
+            self.logger.error("缺少 olefile 库，无法解析 .wps 文件")
+            return ""
         try:
             import olefile
             if not olefile.isOleFile(file_path):
@@ -379,9 +490,417 @@ class FileScanner:
                 return "".join(text_parts)
             finally:
                 ole.close()
-        except ImportError:
-            self.logger.error("缺少 olefile 库，无法解析 .wps 文件")
-            return ""
         except Exception as e:
             self.logger.warning(f"wps 解析失败: {file_path} - {e}")
             return ""
+
+    # ----------------------------------------------------------
+    #  增量提取 + 匹配方法：边提取边检测，达到阈值立即停止
+    # ----------------------------------------------------------
+
+    def _read_plain_text_incremental(self, file_path, matcher, size_mb):
+        """纯文本增量提取+匹配"""
+        accumulated = None
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                chunk_lines = []
+                chunk_size = 0
+                CHUNK_THRESHOLD = 500  # 每 500 行做一次匹配检测
+
+                for i, line in enumerate(f):
+                    if i >= 10000:
+                        break
+                    chunk_lines.append(line)
+                    chunk_size += 1
+
+                    if chunk_size >= CHUNK_THRESHOLD:
+                        chunk_text = "".join(chunk_lines)
+                        should_stop, accumulated = matcher.scan_text_incremental(
+                            chunk_text, accumulated
+                        )
+                        chunk_lines = []
+                        chunk_size = 0
+
+                        if should_stop:
+                            is_sensitive, details = matcher.get_match_details(accumulated)
+                            return is_sensitive, details, size_mb
+
+                # 处理剩余行
+                if chunk_lines:
+                    chunk_text = "".join(chunk_lines)
+                    should_stop, accumulated = matcher.scan_text_incremental(
+                        chunk_text, accumulated
+                    )
+
+        except (IOError, PermissionError) as e:
+            self.logger.warning(f"文本文件读取失败: {file_path} - {e}")
+
+        is_sensitive, details = matcher.get_match_details(accumulated or {})
+        return is_sensitive, details, size_mb
+
+    def _read_docx_incremental(self, file_path, matcher, size_mb):
+        """docx 增量提取+匹配"""
+        docx_mod = _lazy_import("docx")
+        if docx_mod is None:
+            return False, [], size_mb
+        try:
+            from docx import Document
+            doc = Document(file_path)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 200
+
+            for para in doc.paragraphs:
+                chunk_parts.append(para.text)
+                chunk_size += 1
+                if chunk_size >= CHUNK_THRESHOLD:
+                    chunk_text = "\n".join(chunk_parts)
+                    should_stop, accumulated = matcher.scan_text_incremental(
+                        chunk_text, accumulated
+                    )
+                    chunk_parts = []
+                    chunk_size = 0
+                    if should_stop:
+                        is_sensitive, details = matcher.get_match_details(accumulated)
+                        return is_sensitive, details, size_mb
+
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " ".join(cell.text for cell in row.cells)
+                    chunk_parts.append(row_text)
+                    chunk_size += 1
+                    if chunk_size >= CHUNK_THRESHOLD:
+                        chunk_text = "\n".join(chunk_parts)
+                        should_stop, accumulated = matcher.scan_text_incremental(
+                            chunk_text, accumulated
+                        )
+                        chunk_parts = []
+                        chunk_size = 0
+                        if should_stop:
+                            is_sensitive, details = matcher.get_match_details(accumulated)
+                            return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"docx 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
+
+    def _read_xlsx_incremental(self, file_path, matcher, size_mb):
+        """xlsx 增量提取+匹配"""
+        openpyxl_mod = _lazy_import("openpyxl")
+        if openpyxl_mod is None:
+            return False, [], size_mb
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 100
+            line_count = 0
+
+            for sheet in wb.worksheets:
+                if line_count >= 10000:
+                    break
+                for row in sheet.iter_rows(values_only=True):
+                    if line_count >= 10000:
+                        break
+                    row_text = " ".join(self._cell_to_str(cell) for cell in row if cell is not None)
+                    if row_text.strip():
+                        chunk_parts.append(row_text)
+                        chunk_size += 1
+                        line_count += 1
+                        if chunk_size >= CHUNK_THRESHOLD:
+                            chunk_text = "\n".join(chunk_parts)
+                            should_stop, accumulated = matcher.scan_text_incremental(
+                                chunk_text, accumulated
+                            )
+                            chunk_parts = []
+                            chunk_size = 0
+                            if should_stop:
+                                wb.close()
+                                is_sensitive, details = matcher.get_match_details(accumulated)
+                                return is_sensitive, details, size_mb
+
+            wb.close()
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"xlsx 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
+
+    def _read_xls_incremental(self, file_path, matcher, size_mb):
+        """xls 增量提取+匹配"""
+        xlrd_mod = _lazy_import("xlrd")
+        if xlrd_mod is None:
+            return False, [], size_mb
+        try:
+            import xlrd
+            wb = xlrd.open_workbook(file_path)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 100
+            line_count = 0
+
+            for sheet_idx in range(wb.nsheets):
+                if line_count >= 10000:
+                    break
+                sheet = wb.sheet_by_index(sheet_idx)
+                for row_idx in range(sheet.nrows):
+                    if line_count >= 10000:
+                        break
+                    row_values = sheet.row_values(row_idx)
+                    row_text = " ".join(self._cell_to_str(v) for v in row_values if v != "")
+                    if row_text.strip():
+                        chunk_parts.append(row_text)
+                        chunk_size += 1
+                        line_count += 1
+                        if chunk_size >= CHUNK_THRESHOLD:
+                            chunk_text = "\n".join(chunk_parts)
+                            should_stop, accumulated = matcher.scan_text_incremental(
+                                chunk_text, accumulated
+                            )
+                            chunk_parts = []
+                            chunk_size = 0
+                            if should_stop:
+                                is_sensitive, details = matcher.get_match_details(accumulated)
+                                return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"xls 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
+
+    def _read_csv_incremental(self, file_path, matcher, size_mb):
+        """csv 增量提取+匹配"""
+        accumulated = None
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                chunk_parts = []
+                chunk_size = 0
+                CHUNK_THRESHOLD = 100
+
+                for i, row in enumerate(reader):
+                    if i >= 10000:
+                        break
+                    row_text = " ".join(row)
+                    if row_text.strip():
+                        chunk_parts.append(row_text)
+                        chunk_size += 1
+                        if chunk_size >= CHUNK_THRESHOLD:
+                            chunk_text = "\n".join(chunk_parts)
+                            should_stop, accumulated = matcher.scan_text_incremental(
+                                chunk_text, accumulated
+                            )
+                            chunk_parts = []
+                            chunk_size = 0
+                            if should_stop:
+                                is_sensitive, details = matcher.get_match_details(accumulated)
+                                return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+        except (IOError, PermissionError) as e:
+            self.logger.warning(f"CSV 文件读取失败: {file_path} - {e}")
+
+        is_sensitive, details = matcher.get_match_details(accumulated or {})
+        return is_sensitive, details, size_mb
+
+    def _read_pptx_incremental(self, file_path, matcher, size_mb):
+        """pptx 增量提取+匹配"""
+        pptx_mod = _lazy_import("pptx")
+        if pptx_mod is None:
+            return False, [], size_mb
+        try:
+            from pptx import Presentation
+            prs = Presentation(file_path)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 50
+            line_count = 0
+
+            for slide in prs.slides:
+                if line_count >= 10000:
+                    break
+                for shape in slide.shapes:
+                    if line_count >= 10000:
+                        break
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            if line_count >= 10000:
+                                break
+                            text = para.text.strip()
+                            if text:
+                                chunk_parts.append(text)
+                                chunk_size += 1
+                                line_count += 1
+                    if shape.has_table:
+                        table = shape.table
+                        for row in table.rows:
+                            if line_count >= 10000:
+                                break
+                            row_text = " ".join(cell.text for cell in row.cells)
+                            if row_text.strip():
+                                chunk_parts.append(row_text)
+                                chunk_size += 1
+                                line_count += 1
+
+                    if chunk_size >= CHUNK_THRESHOLD:
+                        chunk_text = "\n".join(chunk_parts)
+                        should_stop, accumulated = matcher.scan_text_incremental(
+                            chunk_text, accumulated
+                        )
+                        chunk_parts = []
+                        chunk_size = 0
+                        if should_stop:
+                            is_sensitive, details = matcher.get_match_details(accumulated)
+                            return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"pptx 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
+
+    def _read_pdf_incremental(self, file_path, matcher, size_mb):
+        """PDF 增量提取+匹配：优先 PyMuPDF，回退 pdfplumber"""
+        fitz_mod = _lazy_import("fitz")
+        if fitz_mod is not None:
+            return self._read_pdf_fitz_incremental(file_path, matcher, size_mb)
+
+        pdfplumber_mod = _lazy_import("pdfplumber")
+        if pdfplumber_mod is not None:
+            return self._read_pdf_pdfplumber_incremental(file_path, matcher, size_mb)
+
+        self.logger.error("缺少 PyMuPDF (fitz) 或 pdfplumber 库，无法解析 .pdf 文件")
+        return False, [], size_mb
+
+    def _read_pdf_fitz_incremental(self, file_path, matcher, size_mb):
+        """使用 PyMuPDF 增量提取+匹配"""
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 10  # PDF 每页内容多，每 10 页检测一次
+            line_count = 0
+
+            for page in doc:
+                if line_count >= 10000:
+                    break
+                text = page.get_text()
+                if text:
+                    for line in text.split("\n"):
+                        if line_count >= 10000:
+                            break
+                        if line.strip():
+                            chunk_parts.append(line.strip())
+                            chunk_size += 1
+                            line_count += 1
+
+                if chunk_size >= CHUNK_THRESHOLD:
+                    chunk_text = "\n".join(chunk_parts)
+                    should_stop, accumulated = matcher.scan_text_incremental(
+                        chunk_text, accumulated
+                    )
+                    chunk_parts = []
+                    chunk_size = 0
+                    if should_stop:
+                        doc.close()
+                        is_sensitive, details = matcher.get_match_details(accumulated)
+                        return is_sensitive, details, size_mb
+
+            doc.close()
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"PyMuPDF 增量解析失败，回退: {file_path} - {e}")
+            return self._read_pdf_pdfplumber_incremental(file_path, matcher, size_mb)
+
+    def _read_pdf_pdfplumber_incremental(self, file_path, matcher, size_mb):
+        """使用 pdfplumber 增量提取+匹配（回退方案）"""
+        try:
+            import pdfplumber
+            accumulated = None
+            chunk_parts = []
+            chunk_size = 0
+            CHUNK_THRESHOLD = 5  # pdfplumber 慢，每 5 页检测一次
+            line_count = 0
+
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    if line_count >= 10000:
+                        break
+                    text = page.extract_text()
+                    if text:
+                        for line in text.split("\n"):
+                            if line_count >= 10000:
+                                break
+                            if line.strip():
+                                chunk_parts.append(line.strip())
+                                chunk_size += 1
+                                line_count += 1
+
+                    if chunk_size >= CHUNK_THRESHOLD:
+                        chunk_text = "\n".join(chunk_parts)
+                        should_stop, accumulated = matcher.scan_text_incremental(
+                            chunk_text, accumulated
+                        )
+                        chunk_parts = []
+                        chunk_size = 0
+                        if should_stop:
+                            is_sensitive, details = matcher.get_match_details(accumulated)
+                            return is_sensitive, details, size_mb
+
+            if chunk_parts:
+                chunk_text = "\n".join(chunk_parts)
+                should_stop, accumulated = matcher.scan_text_incremental(
+                    chunk_text, accumulated
+                )
+
+            is_sensitive, details = matcher.get_match_details(accumulated or {})
+            return is_sensitive, details, size_mb
+        except Exception as e:
+            self.logger.warning(f"PDF 增量解析失败: {file_path} - {e}")
+            return False, [], size_mb
