@@ -70,31 +70,67 @@ class EverythingScanner:
     # ----------------------------------------------------------
 
     def _load_dll(self):
-        """加载 Everything SDK DLL"""
+        """加载 Everything SDK DLL（增强版）"""
         if platform.system() != "Windows":
             self.logger.debug("EverythingScanner: 非 Windows 系统，不可用")
             return
 
-        # 强制使用 32 位 DLL（兼容 Windows XP 和 32/64 位系统）
-        # 注意：如果使用 64 位 Python 打包，需确保系统安装了 32 位 Everything DLL
         dll_name = "Everything.dll"
-        bitness = "32-bit (强制)"
-        self.logger.debug(f"EverythingScanner: 强制使用 {bitness} DLL，查找 {dll_name}")
+        
+        # 检测 Python 位数
+        is_64bit = sys.maxsize > 2**32
+        bitness_str = "64位" if is_64bit else "32位"
+        
+        # 调试信息
+        self.logger.debug(f"=== Everything DLL 加载诊断 ===")
+        self.logger.debug(f"系统: {platform.system()} {platform.release()}")
+        self.logger.debug(f"Python: {sys.version.split()[0]} ({bitness_str})")
+        self.logger.debug(f"DLL 文件名: {dll_name}")
 
         search_dirs = self._get_search_dirs()
+        self.logger.debug(f"搜索路径数: {len(search_dirs)}")
+
+        # 常见 Windows 错误码映射
+        error_codes = {
+            126: "找不到指定的模块（DLL文件缺失或依赖缺失）",
+            127: "找不到指定的程序入口点（DLL版本不兼容）",
+            193: "不是有效的 Win32 应用程序（位数不匹配）",
+            5: "拒绝访问（权限不足）",
+        }
 
         for dir_path in search_dirs:
             dll_path = os.path.join(dir_path, dll_name) if dir_path else dll_name
-            if dir_path and not os.path.exists(dll_path):
-                continue
+            
+            # 确保路径规范化
+            if dir_path:
+                dll_path = os.path.abspath(dll_path)
+                if not os.path.exists(dll_path):
+                    self.logger.debug(f"  跳过: {dll_path}（文件不存在）")
+                    continue
+            
+            self.logger.debug(f"  尝试加载: {dll_path}")
+            
             try:
+                # 尝试 WinDLL（stdcall 调用约定）
                 self._dll = ctypes.WinDLL(dll_path)
                 self._setup_funcs()
                 self._available = True
                 self.logger.info(f"Everything 引擎已加载 ({dll_path})")
                 return
+                
+            except OSError as e:
+                err_code = e.winerror
+                err_msg = error_codes.get(err_code, str(e))
+                self.logger.warning(f"DLL 加载失败 [{err_code}]: {err_msg}")
+                self.logger.warning(f"  路径: {dll_path}")
+                
+                # 位数不匹配的特殊提示
+                if err_code == 193:
+                    self.logger.warning(f"  提示: 当前 Python 是 {bitness_str}，请确保 DLL 位数匹配")
+                    
             except Exception as e:
-                self.logger.warning(f"Everything DLL 加载失败 ({dll_path}): {e}")
+                self.logger.warning(f"DLL 加载异常: {type(e).__name__}: {e}")
+                self.logger.warning(f"  路径: {dll_path}")
 
         self.logger.info("Everything 未安装或 SDK DLL 未找到，将使用 Python os.walk 回退方案")
 
