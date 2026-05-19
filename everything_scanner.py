@@ -102,13 +102,17 @@ class EverythingScanner:
         """获取 DLL 搜索路径列表"""
         dirs = []
 
-        # 1) 与 EXE/脚本同目录
+        # 1) PyInstaller 打包后的临时解压目录（优先级最高）
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            dirs.append(sys._MEIPASS)
+
+        # 2) 与 EXE/脚本同目录
         if getattr(sys, 'frozen', False):
             dirs.append(os.path.dirname(sys.executable))
         else:
             dirs.append(os.path.dirname(os.path.abspath(__file__)))
 
-        # 2) Everything 标准安装目录
+        # 3) Everything 标准安装目录
         for env_var in ["ProgramFiles", "ProgramFiles(x86)"]:
             pf = os.environ.get(env_var, "")
             if pf:
@@ -116,7 +120,7 @@ class EverythingScanner:
                 if os.path.exists(everything_dir):
                     dirs.append(everything_dir)
 
-        # 3) 系统 PATH（让 WinDLL 自动搜索）
+        # 4) 系统 PATH（让 WinDLL 自动搜索）
         dirs.append("")
 
         return dirs
