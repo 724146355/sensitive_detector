@@ -25,6 +25,25 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: 下载 Everything SDK DLL
+        run: |
+          # 创建临时目录
+          mkdir -p temp_everything
+          cd temp_everything
+          
+          # 下载 Everything 便携版（包含 SDK DLL）
+          Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-1.4.1.1015.x64.zip" -OutFile "Everything.zip"
+          Expand-Archive -Path "Everything.zip" -DestinationPath "extracted" -Force
+          
+          # 复制 DLL 到项目根目录
+          Copy-Item -Path "extracted\Everything64.dll" -Destination ".." -Force
+          Copy-Item -Path "extracted\Everything.dll" -Destination ".." -Force
+          
+          cd ..
+          Remove-Item -Recurse -Force temp_everything
+          
+          Write-Host "DLL 文件下载完成"
+
       - name: 安装项目依赖
         run: |
           python -m pip install --upgrade pip
