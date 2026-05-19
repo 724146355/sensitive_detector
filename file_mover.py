@@ -1,5 +1,6 @@
 import os
 import shutil
+import threading
 from datetime import datetime
 from logger import Logger
 
@@ -9,6 +10,9 @@ class FileMover:
         self.backup_base_path = backup_base_path
         self.dev_mode = dev_mode  # True=只复制, False=剪切(复制+删除原文件)
         self.logger = Logger()
+        self.bat_file_path = None
+        self.bat_lock = threading.Lock()
+        self._bat_counter = 0
 
     def create_date_folder(self):
         """创建日期文件夹，如果已存在则追加 _1, _2, ... 编号
@@ -84,6 +88,9 @@ class FileMover:
                 except (OSError, PermissionError) as e:
                     self.logger.warning(f"原文件删除失败(已复制): {src_path} - {e}")
 
+            # 生成还原批处理命令
+            self._append_restore_command(src_path, dest_path)
+
             return dest_path
         except (IOError, PermissionError, OSError) as e:
             self.logger.error(f"文件传输失败: {src_path} - {e}")
@@ -102,6 +109,74 @@ class FileMover:
                 moved_files.append(result)
 
         return moved_files
+
+    def init_restore_bat(self, date_folder):
+        """初始化还原批处理文件，在日期文件夹中创建 restore.bat"""
+        self.bat_file_path = os.path.join(date_folder, "restore.bat")
+        self._bat_counter = 0
+        try:
+            with open(self.bat_file_path, "w", encoding="utf-8") as f:
+                f.write("@echo off\n")
+                f.write("chcp 65001 >nul\n")
+                f.write("echo ============================================\n")
+                f.write("echo   敏感文件还原批处理\n")
+                f.write("echo ============================================\n")
+                f.write("echo.\n")
+                if self.dev_mode:
+                    f.write("echo 运行模式: 开发模式(原文件仍保留在原位置)\n")
+                else:
+                    f.write("echo 运行模式: 正式模式(原文件已被剪切)\n")
+                f.write("echo.\n")
+                f.write("echo 开始还原敏感文件到原始路径...\n")
+                f.write("echo.\n")
+            self.logger.info(f"已创建还原批处理文件: {self.bat_file_path}")
+        except (IOError, OSError) as e:
+            self.logger.warning(f"批处理文件创建失败: {e}")
+            self.bat_file_path = None
+
+    def _append_restore_command(self, src_path, dest_path):
+        """向批处理文件追加一条还原命令
+
+        Args:
+            src_path: 文件原始路径（还原目标，文件名保持原样）
+            dest_path: 文件在备份目录中的路径（还原来源，可能含_1/_2编号）
+        """
+        if not self.bat_file_path:
+            return
+
+        original_dir = os.path.dirname(src_path).replace("/", "\\")
+        dest_win = dest_path.replace("/", "\\")
+        src_win = src_path.replace("/", "\\")
+        original_name = os.path.basename(src_path)
+        backup_name = os.path.basename(dest_path)
+
+        with self.bat_lock:
+            self._bat_counter += 1
+            try:
+                with open(self.bat_file_path, "a", encoding="utf-8") as f:
+                    f.write(f'if not exist "{original_dir}" mkdir "{original_dir}"\n')
+                    f.write(f'move /Y "{dest_win}" "{src_win}"\n')
+                    if backup_name != original_name:
+                        f.write(f'echo   [{self._bat_counter}] {backup_name} -^> {original_name} ({src_win})\n')
+                    else:
+                        f.write(f'echo   [{self._bat_counter}] {original_name} -^> {src_win}\n')
+            except (IOError, OSError) as e:
+                self.logger.warning(f"批处理文件写入失败: {e}")
+
+    def finalize_restore_bat(self):
+        """完成还原批处理文件（添加结尾信息）"""
+        if not self.bat_file_path:
+            return
+
+        try:
+            with self.bat_lock:
+                with open(self.bat_file_path, "a", encoding="utf-8") as f:
+                    f.write("echo.\n")
+                    f.write(f"echo 还原完成! 共 {self._bat_counter} 个文件\n")
+                    f.write("echo.\n")
+                    f.write("pause\n")
+        except (IOError, OSError) as e:
+            self.logger.warning(f"批处理文件结尾写入失败: {e}")
 
     def _resolve_name_conflict(self, dest_path):
         """解决目标文件名冲突，追加 _1, _2, ... 编号"""

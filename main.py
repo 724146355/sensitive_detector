@@ -71,7 +71,7 @@ def resolve_target_paths():
         return [os.path.abspath(target)]
 
 
-def process_single_file(file_path, scanner, matcher, skip_size_check):
+def process_single_file(file_path, scanner, matcher, skip_size_check, start_times, start_lock):
     """处理单个文件：提取文本 + 敏感检测
 
     Args:
@@ -79,11 +79,15 @@ def process_single_file(file_path, scanner, matcher, skip_size_check):
         scanner: FileScanner 实例
         matcher: Matcher 实例
         skip_size_check: 是否跳过大小检查（Everything 已过滤时为 True）
+        start_times: 共享字典，记录实际开始处理时间
+        start_lock: 线程安全锁
 
     Returns:
         (file_path, is_sensitive, details, size_mb, elapsed_ms)
     """
     start = time.monotonic()
+    with start_lock:
+        start_times[file_path] = start
     try:
         is_sensitive, details, size_mb = scanner.extract_and_match(file_path, matcher)
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -223,6 +227,7 @@ def main():
     # 检测前：先创建日期文件夹
     # ----------------------------------------------------------
     date_folder = mover.create_date_folder()
+    mover.init_restore_bat(date_folder)
     logger.info(f"备份目录: {date_folder}")
 
     transferred_files = []  # 已复制/剪切的文件目标路径
@@ -231,7 +236,7 @@ def main():
     # ----------------------------------------------------------
     # 并发检测 + 命中即复制/剪切
     # ----------------------------------------------------------
-    num_workers = min(os.cpu_count() or 4, 8)
+    num_workers = max((os.cpu_count() or 4) // 2, 1)
     total_files = len(target_files)
 
     logger.info("-" * 60)
@@ -246,17 +251,19 @@ def main():
     last_progress_pct = -1
     HEARTBEAT_INTERVAL = 5  # 每 5 秒输出一次心跳日志
 
+    # 共享字典：记录每个文件实际开始处理的时间（而非提交时间）
+    file_start_times = {}
+    file_start_lock = threading.Lock()
+
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         # 提交所有文件处理任务
         future_to_file = {
             executor.submit(
-                process_single_file, fp, scanner, matcher, everything_filtered_size
+                process_single_file, fp, scanner, matcher, everything_filtered_size,
+                file_start_times, file_start_lock
             ): fp
             for fp in target_files
         }
-
-        # 记录每个 future 的提交时间，用于超时判定
-        future_start_times = {f: time.monotonic() for f in future_to_file}
 
         pending = set(future_to_file.keys())
         last_heartbeat = time.monotonic()
@@ -307,14 +314,17 @@ def main():
                     last_progress_pct = pct
                     logger.info(f"进度: {pct}% ({completed_count}/{total_files})")
 
-            # 检查超时的 future
+            # 检查超时的 future（基于实际开始处理时间，而非提交时间）
             now = time.monotonic()
             timed_out = set()
             for f in list(pending):
-                elapsed_sec = now - future_start_times[f]
+                fp = future_to_file[f]
+                # 只有已开始处理的文件才判定超时，排队中的不算
+                if fp not in file_start_times:
+                    continue
+                elapsed_sec = now - file_start_times[fp]
                 if elapsed_sec > file_timeout:
                     timed_out.add(f)
-                    fp = future_to_file[f]
                     logger.error(
                         f"文件处理超时（>{file_timeout}s），跳过: {fp}"
                     )
@@ -344,6 +354,9 @@ def main():
         logger.info(f"其中 {skipped_count} 个文件快速通过（<{SILENT_THRESHOLD_MS}ms）")
     if timeout_count > 0:
         logger.info(f"其中 {timeout_count} 个文件处理超时（>{file_timeout}s）")
+
+    # 完成还原批处理文件
+    mover.finalize_restore_bat()
 
     logger.info("-" * 60)
     logger.info(f"检测完成，共发现 {len(transferred_files)} 个敏感文件")
