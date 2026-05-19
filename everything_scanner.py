@@ -64,6 +64,7 @@ class EverythingScanner:
         self._dll = None
         self._available = False
         self._has_is_folder_func = False  # 标记是否有 Everything_IsFolder 函数
+        self._has_get_size_func = False    # 标记是否有 Everything_GetResultSize 函数
         self._load_dll()
 
     # ----------------------------------------------------------
@@ -190,9 +191,15 @@ class EverythingScanner:
         ]
         dll.Everything_GetResultFullPathNameW.restype = wintypes.DWORD
 
-        # ULONGLONG Everything_GetResultSize(DWORD nIndex)
-        dll.Everything_GetResultSize.argtypes = [wintypes.DWORD]
-        dll.Everything_GetResultSize.restype = ctypes.c_ulonglong
+        # ULONGLONG Everything_GetResultSize(DWORD nIndex) - 向后兼容：旧版本 DLL 可能没有此函数
+        if hasattr(dll, 'Everything_GetResultSize'):
+            dll.Everything_GetResultSize.argtypes = [wintypes.DWORD]
+            dll.Everything_GetResultSize.restype = ctypes.c_ulonglong
+            self._has_get_size_func = True
+            self.logger.debug("DLL 支持 Everything_GetResultSize 函数")
+        else:
+            self._has_get_size_func = False
+            self.logger.warning("DLL 版本较旧，不支持 Everything_GetResultSize 函数，将跳过大小过滤")
 
         # BOOL Everything_IsFolder(DWORD nIndex) - 向后兼容：旧版本 DLL 可能没有此函数
         if hasattr(dll, 'Everything_IsFolder'):
@@ -387,8 +394,8 @@ class EverythingScanner:
                 if full_path.endswith('\\'):
                     continue
 
-            # 大小过滤（可选）
-            if max_size_bytes is not None:
+            # 大小过滤（可选，向后兼容）
+            if max_size_bytes is not None and self._has_get_size_func:
                 file_size = dll.Everything_GetResultSize(i)
                 if file_size > max_size_bytes:
                     oversized_count += 1
