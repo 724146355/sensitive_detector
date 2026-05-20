@@ -1,5 +1,15 @@
-import os
+# 立即显示启动提示，避免用户以为程序卡死
+# 必须在导入其他模块之前执行，因为 PyInstaller 解压和模块导入可能需要数秒
 import sys
+for _stream in (sys.stdout, sys.stderr):
+    if _stream:
+        try:
+            _stream.reconfigure(line_buffering=True, write_through=True)
+        except (AttributeError, OSError):
+            pass
+print("程序启动中，请稍候...如遇白屏请回车重试", flush=True)
+
+import os
 import json
 import time
 import gc
@@ -155,21 +165,7 @@ def process_single_file(file_path, scanner, matcher, skip_size_check, start_time
 
 
 def main():
-    # 确保 Windows EXE 控制台输出立即可见，避免启动白屏
-    # PyInstaller 打包后 stdout 默认全缓冲，logging 写入后不会立即显示
-    # write_through=True: TextIOWrapper 不缓冲，直接写入底层 BufferedWriter
-    # line_buffering=True: 遇到换行符时强制 flush 整个输出管道（含 BufferedWriter）
-    # 两者配合才能保证每行日志立即到达控制台
-    for stream in (sys.stdout, sys.stderr):
-        if stream:
-            try:
-                stream.reconfigure(line_buffering=True, write_through=True)
-            except (AttributeError, OSError):
-                pass
-
-    # 强制输出一行启动提示，唤醒控制台显示，避免用户以为程序卡死
-    print("敏感检测工具启动中...", flush=True)
-
+    # 启动提示已在文件导入前显示，此处继续后续初始化
     faulthandler.enable()
     logger = Logger()
     logger.info("=" * 60)
