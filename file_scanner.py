@@ -1,5 +1,6 @@
 import os
 import csv
+import traceback
 import importlib
 from logger import Logger
 
@@ -109,6 +110,7 @@ class FileScanner:
                 return ""
         except Exception as e:
             self.logger.warning(f"文件解析失败 ({ext}): {file_path} - {e}")
+            self.logger.debug(traceback.format_exc())
             return ""
 
     def extract_and_match(self, file_path, matcher):
@@ -156,6 +158,7 @@ class FileScanner:
                 return is_sensitive, details, size_mb
         except Exception as e:
             self.logger.warning(f"文件解析失败 ({ext}): {file_path} - {e}")
+            self.logger.debug(traceback.format_exc())
             return False, [], size_mb
 
     # ----------------------------------------------------------

@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import gc
+import traceback
 import threading
 import ctypes
 import faulthandler
@@ -17,17 +18,27 @@ from archiver import Archiver
 from everything_scanner import EverythingScanner
 
 
+class ThreadKillError(Exception):
+    """自定义异常：用于线程空闲超时时中断工作线程的当前处理
+
+    继承自 Exception（而非 BaseException），确保 ThreadPoolExecutor 能正确捕获
+    并存储为 future 的异常结果，避免 SystemExit 导致程序退出或线程异常终止。
+    """
+    pass
+
+
 def _kill_thread(thread_ident):
-    """强制终止指定线程（通过在线程中异步抛出 SystemExit 异常）
+    """中断指定线程的当前处理（通过在线程中异步抛出 ThreadKillError 异常）
 
     注意：
     - 如果线程正在执行 C 扩展代码（如 PyMuPDF），异常将在 C 代码返回后生效
-    - 这是 Python 中终止线程的标准方式，但并非在所有情况下都能立即生效
+    - 使用 ThreadKillError(Exception) 而非 SystemExit，确保 ThreadPoolExecutor 能正确处理
+    - 线程不会死亡，而是中断当前文件处理，继续执行队列中的下一个任务
     - 返回 True 表示成功设置异常，False 表示线程已不存在或操作失败
     """
     try:
         tid = ctypes.c_long(thread_ident)
-        exc = ctypes.py_object(SystemExit)
+        exc = ctypes.py_object(ThreadKillError)
         res = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, exc)
         if res == 0:
             return False  # 线程已不存在
@@ -124,8 +135,8 @@ def process_single_file(file_path, scanner, matcher, skip_size_check, start_time
         is_sensitive, details, size_mb = scanner.extract_and_match(file_path, matcher)
         elapsed_ms = (time.monotonic() - start) * 1000
         return file_path, is_sensitive, details, size_mb, elapsed_ms
-    except (SystemExit, KeyboardInterrupt):
-        # 线程被强制终止（空闲超时），不再处理当前文件
+    except ThreadKillError:
+        # 线程空闲超时中断，不再处理当前文件
         raise
     except MemoryError:
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -136,7 +147,7 @@ def process_single_file(file_path, scanner, matcher, skip_size_check, start_time
     except Exception as e:
         elapsed_ms = (time.monotonic() - start) * 1000
         logger = Logger()
-        logger.warning(f"文件处理异常: {file_path} - {e}")
+        logger.exception(f"文件处理异常: {file_path}")
         return file_path, False, [], -1, elapsed_ms
     finally:
         with file_thread_lock:
@@ -400,12 +411,12 @@ def main():
                         fp = future_to_file[future]
                         try:
                             file_path, is_sensitive, details, size_mb, elapsed_ms = future.result()
-                        except (SystemExit, KeyboardInterrupt):
-                            # 线程被强制终止（空闲超时），忽略结果
+                        except ThreadKillError:
+                            # 线程空闲超时中断，忽略结果
                             soft_timed_out.pop(fp, None)
                             continue
-                        except Exception as e:
-                            logger.error(f"任务执行异常: {e}")
+                        except Exception:
+                            logger.exception(f"任务执行异常: {fp}")
                             error_count += 1
                             completed_count += 1
                             soft_timed_out.pop(fp, None)
@@ -489,7 +500,7 @@ def main():
                                 killed = _kill_thread(thread_ident)
                                 if killed:
                                     logger.error(
-                                        f"线程空闲超时（>{thread_idle_timeout}s），终止线程并重新创建，"
+                                        f"线程空闲超时（>{thread_idle_timeout}s），已发送中断信号，"
                                         f"跳过文件: {fp}"
                                     )
                                 else:
@@ -504,15 +515,6 @@ def main():
                                 )
                             thread_kill_count += 1
                             del soft_timed_out[fp]
-
-                            # 清理 executor 中已死亡的线程，并提交空任务以触发新线程创建
-                            dead_threads = {t for t in executor._threads if not t.is_alive()}
-                            if dead_threads:
-                                executor._threads -= dead_threads
-                            dummy = executor.submit(lambda: None)
-                            dummy.add_done_callback(
-                                lambda f: f.exception() if not f.cancelled() else None
-                            )
 
                     # 检查软超时线程是否已自然完成
                     completed_soft = []
@@ -567,7 +569,7 @@ def main():
     if timeout_count > 0:
         logger.info(f"其中 {timeout_count} 个文件处理超时（>{file_timeout}s）")
     if thread_kill_count > 0:
-        logger.info(f"其中 {thread_kill_count} 个线程因空闲超时被终止并重新创建（>{thread_idle_timeout}s）")
+        logger.info(f"其中 {thread_kill_count} 个文件因线程空闲超时被中断（>{thread_idle_timeout}s）")
     if error_count > 0:
         logger.info(f"其中 {error_count} 个文件处理异常")
 
