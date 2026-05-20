@@ -52,7 +52,7 @@ def _kill_thread(thread_ident):
 
 
 def get_user_input():
-    work_key = input("请输入工号Key（可为空，直接回车跳过）: ").strip()
+    work_key = input("请输入密码Key（可为空，直接回车跳过）: ").strip()
 
     size_input = input("请输入大文件过滤阈值（单位MB，直接回车使用默认值100MB）: ").strip()
     if size_input == "":
