@@ -14,6 +14,13 @@ class ConsoleFilter(logging.Filter):
         return not getattr(record, 'file_only', False)
 
 
+class FlushStreamHandler(logging.StreamHandler):
+    """自定义 StreamHandler，每次 emit 后强制刷新流"""
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
 class Logger:
     _instance = None
 
@@ -30,13 +37,14 @@ class Logger:
 
         self.logger = logging.getLogger("SensitiveDetector")
         self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
 
         formatter = logging.Formatter(
             "[%(asctime)s] [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler = FlushStreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         console_handler.addFilter(ConsoleFilter())
