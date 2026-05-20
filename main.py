@@ -253,7 +253,7 @@ def main():
 
     logger.info("-" * 60)
     logger.info("请输入启动参数")
-    logger.flush()  # 确保所有日志已刷新到控制台，避免提示被缓冲
+    sys.stdout.flush()  # 确保所有日志已刷新到控制台，避免提示被缓冲
     work_key, user_max_size = get_user_input()
 
     effective_max_size = user_max_size if user_max_size is not None else default_max_size
@@ -261,7 +261,7 @@ def main():
     logger.info(f"大文件阈值: {effective_max_size}MB")
 
     logger.info("-" * 60)
-    logger.flush()  # 确保提示信息已刷新到控制台
+    sys.stdout.flush()  # 确保提示信息已刷新到控制台
     target_paths = resolve_target_paths()
     for p in target_paths:
         logger.info(f"目标扫描路径: {p}")

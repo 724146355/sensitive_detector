@@ -1,6 +1,5 @@
 import logging
 import sys
-import time
 from datetime import datetime
 
 
@@ -15,49 +14,11 @@ class ConsoleFilter(logging.Filter):
         return not getattr(record, 'file_only', False)
 
 
-class SmartFlushStreamHandler(logging.StreamHandler):
-    """智能刷新 StreamHandler：平衡实时性和性能
-
-    刷新策略：
-    - WARNING/ERROR 级别：立即刷新（关键信息需要及时显示）
-    - INFO 级别：增量刷新（每 FLUSH_INTERVAL_SEC 秒或每 FLUSH_MESSAGE_COUNT 条消息）
-    - 当检测到用户输入等待时（如 input()），自动刷新缓冲区
-    """
-    FLUSH_INTERVAL_SEC = 0.5  # 刷新时间间隔
-    FLUSH_MESSAGE_COUNT = 10  # 消息计数阈值
-
-    def __init__(self, stream=None):
-        super().__init__(stream)
-        self._flush_counter = 0
-        self._last_flush_time = time.monotonic()
-
+class FlushStreamHandler(logging.StreamHandler):
+    """自定义 StreamHandler，每次 emit 后强制刷新流"""
     def emit(self, record):
         super().emit(record)
-        
-        # WARNING/ERROR 级别立即刷新
-        if record.levelno >= logging.WARNING:
-            self.flush()
-            self._flush_counter = 0
-            self._last_flush_time = time.monotonic()
-            return
-
-        # INFO 级别：增量刷新
-        self._flush_counter += 1
-        now = time.monotonic()
-        
-        # 满足任一条件则刷新
-        if (self._flush_counter >= self.FLUSH_MESSAGE_COUNT or 
-            now - self._last_flush_time >= self.FLUSH_INTERVAL_SEC):
-            self.flush()
-            self._flush_counter = 0
-            self._last_flush_time = now
-
-    def force_flush(self):
-        """强制刷新缓冲区（用于用户输入前）"""
-        if self._flush_counter > 0:
-            self.flush()
-            self._flush_counter = 0
-            self._last_flush_time = time.monotonic()
+        self.flush()
 
 
 class Logger:
@@ -83,10 +44,10 @@ class Logger:
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        self.console_handler = SmartFlushStreamHandler(sys.stdout)
-        self.console_handler.setLevel(logging.INFO)
-        self.console_handler.setFormatter(formatter)
-        self.console_handler.addFilter(ConsoleFilter())
+        console_handler = FlushStreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        console_handler.addFilter(ConsoleFilter())
 
         file_handler = logging.FileHandler(
             f"sensitive_detector_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
@@ -95,7 +56,7 @@ class Logger:
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
 
-        self.logger.addHandler(self.console_handler)
+        self.logger.addHandler(console_handler)
         self.logger.addHandler(file_handler)
 
     def debug(self, message):
@@ -120,13 +81,3 @@ class Logger:
 
     def exception(self, message):
         self.logger.exception(message)
-
-    def flush(self):
-        """强制刷新控制台输出缓冲区
-
-        在等待用户输入前调用，确保所有日志已显示到终端
-        """
-        if hasattr(self, 'console_handler'):
-            self.console_handler.force_flush()
-        sys.stdout.flush()
-        sys.stderr.flush()
