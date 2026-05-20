@@ -157,11 +157,18 @@ def process_single_file(file_path, scanner, matcher, skip_size_check, start_time
 def main():
     # 确保 Windows EXE 控制台输出立即可见，避免启动白屏
     # PyInstaller 打包后 stdout 默认全缓冲，logging 写入后不会立即显示
-    if sys.stdout:
-        try:
-            sys.stdout.reconfigure(write_through=True)
-        except (AttributeError, OSError):
-            pass
+    # write_through=True: TextIOWrapper 不缓冲，直接写入底层 BufferedWriter
+    # line_buffering=True: 遇到换行符时强制 flush 整个输出管道（含 BufferedWriter）
+    # 两者配合才能保证每行日志立即到达控制台
+    for stream in (sys.stdout, sys.stderr):
+        if stream:
+            try:
+                stream.reconfigure(line_buffering=True, write_through=True)
+            except (AttributeError, OSError):
+                pass
+
+    # 强制输出一行启动提示，唤醒控制台显示，避免用户以为程序卡死
+    print("敏感检测工具启动中...", flush=True)
 
     faulthandler.enable()
     logger = Logger()
@@ -250,6 +257,7 @@ def main():
 
     logger.info("-" * 60)
     logger.info("请输入启动参数")
+    sys.stdout.flush()  # 确保所有日志已刷新到控制台，避免提示被缓冲
     work_key, user_max_size = get_user_input()
 
     effective_max_size = user_max_size if user_max_size is not None else default_max_size
@@ -257,6 +265,7 @@ def main():
     logger.info(f"大文件阈值: {effective_max_size}MB")
 
     logger.info("-" * 60)
+    sys.stdout.flush()  # 确保提示信息已刷新到控制台
     target_paths = resolve_target_paths()
     for p in target_paths:
         logger.info(f"目标扫描路径: {p}")
@@ -457,18 +466,20 @@ def main():
 
                         # --- 异常/超限文件 ---
                         if size_mb < 0:
-                            logger.info(f"[{completed_count}/{total_files}] 跳过（无法获取大小）: {file_path}")
+                            logger.info_file_only(f"[{completed_count}/{total_files}] 跳过（无法获取大小）: {file_path}")
                             continue
                         if size_mb > effective_max_size and not everything_filtered_size:
-                            logger.info(f"[{completed_count}/{total_files}] 跳过（超出大小阈值 {size_mb:.2f}MB）: {file_path}")
+                            logger.info_file_only(f"[{completed_count}/{total_files}] 跳过（超出大小阈值 {size_mb:.2f}MB）: {file_path}")
                             continue
 
                         # --- 安全文件 ---
+                        # 安全文件详情仅写入文件日志，减少控制台输出量
+                        # 避免处理上万文件时 Windows 控制台渲染跟不上导致假死
                         if elapsed_ms <= SILENT_THRESHOLD_MS:
                             skipped_count += 1
                         else:
-                            logger.info(f"[{completed_count}/{total_files}] {file_path}")
-                            logger.info(f"  判定结果: [安全文件] ({elapsed_ms:.0f}ms, {size_mb:.2f}MB)")
+                            logger.info_file_only(f"[{completed_count}/{total_files}] {file_path}")
+                            logger.info_file_only(f"  判定结果: [安全文件] ({elapsed_ms:.0f}ms, {size_mb:.2f}MB)")
 
                         pct = completed_count * 100 // total_files
                         if pct >= last_progress_pct + 5:

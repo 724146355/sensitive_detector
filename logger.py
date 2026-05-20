@@ -3,6 +3,17 @@ import sys
 from datetime import datetime
 
 
+class ConsoleFilter(logging.Filter):
+    """控制台日志过滤器：拦截标记为 file_only 的日志，不在控制台显示
+
+    当程序处理上万文件时，安全文件的逐条详情输出量巨大，
+    导致 Windows 控制台渲染线程跟不上，表现为"卡住不动"。
+    通过 file_only 标记，安全文件详情只写文件日志，控制台仅显示关键信息。
+    """
+    def filter(self, record):
+        return not getattr(record, 'file_only', False)
+
+
 class Logger:
     _instance = None
 
@@ -28,6 +39,7 @@ class Logger:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
+        console_handler.addFilter(ConsoleFilter())
 
         file_handler = logging.FileHandler(
             f"sensitive_detector_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
@@ -50,6 +62,14 @@ class Logger:
 
     def error(self, message):
         self.logger.error(message)
+
+    def info_file_only(self, message):
+        """仅写入文件日志，不在控制台输出
+
+        用于安全文件/跳过文件等高频但低价值的详情输出，
+        减少控制台输出量，避免 Windows 控制台因渲染不过来而假死。
+        """
+        self.logger.info(message, extra={'file_only': True})
 
     def exception(self, message):
         self.logger.exception(message)
