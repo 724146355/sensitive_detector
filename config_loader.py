@@ -23,7 +23,8 @@ CONFIG_DEFAULT = {
     "match_threshold": 3,
     "backup_base_path": ".\\sensitive_backup",
     "dev": False,
-    "file_timeout_sec": 30
+    "file_timeout_sec": 30,
+    "thread_idle_timeout_sec": 60
 }
 
 
@@ -85,6 +86,10 @@ class ConfigLoader:
     def get_file_timeout(self):
         """获取单文件处理超时时间（秒），超过此时间跳过该文件"""
         return int(self.config.get("file_timeout_sec", CONFIG_DEFAULT["file_timeout_sec"]))
+
+    def get_thread_idle_timeout(self):
+        """获取线程空闲超时时间（秒），超过此时间终止线程并重新创建"""
+        return int(self.config.get("thread_idle_timeout_sec", CONFIG_DEFAULT["thread_idle_timeout_sec"]))
 
     def _write_default_config(self):
         try:

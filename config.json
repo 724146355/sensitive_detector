@@ -17,5 +17,6 @@
     "match_threshold": 3,
     "backup_base_path": ".\\sensitive_backup",
     "dev": false,
-    "file_timeout_sec": 30
+    "file_timeout_sec": 30,
+    "thread_idle_timeout_sec": 60
 }
