@@ -550,6 +550,12 @@ def main():
                             pass
                         del zombie_futures[f]
 
+                    # 定期强制刷新缓冲区（每处理一定数量文件或心跳间隔）
+                    # 防止 Windows 控制台输出缓冲区累积过多导致程序卡死
+                    if done or timed_out:
+                        # 每处理一批结果后强制刷新一次
+                        logger.flush()
+                    
                     # 心跳日志：如果没有新完成的结果，也输出状态让用户知道程序没卡死
                     if not done and not timed_out:
                         elapsed_since_last = now - last_heartbeat
@@ -566,6 +572,8 @@ def main():
                             if stuck_files:
                                 parts.append(f"超时等待: {len(stuck_files)}个")
                             logger.info("，".join(parts))
+                            # 心跳日志后强制刷新，确保状态信息及时显示
+                            logger.flush()
                     else:
                         last_heartbeat = now
 
