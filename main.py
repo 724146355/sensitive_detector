@@ -155,6 +155,14 @@ def process_single_file(file_path, scanner, matcher, skip_size_check, start_time
 
 
 def main():
+    # 确保 Windows EXE 控制台输出立即可见，避免启动白屏
+    # PyInstaller 打包后 stdout 默认全缓冲，logging 写入后不会立即显示
+    if sys.stdout:
+        try:
+            sys.stdout.reconfigure(write_through=True)
+        except (AttributeError, OSError):
+            pass
+
     faulthandler.enable()
     logger = Logger()
     logger.info("=" * 60)
