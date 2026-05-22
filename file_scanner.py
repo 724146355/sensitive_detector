@@ -23,25 +23,6 @@ WINDOWS_SYSTEM_DIRS = {
     "$recycle.bin",
     "system volume information",
 }
-
-
-def _is_windows_system_dir(parent_path, dir_name):
-    """判断目录是否为 Windows 系统目录（仅在驱动器根下才过滤）
-
-    只过滤驱动器根目录下的系统目录（如 C:\\Windows、C:\\Program Files），
-    避免误过滤用户自建的同名子文件夹。
-    """
-    # 判断 parent_path 是否为驱动器根（如 C:\ 或 C:）
-    normalized_parent = os.path.normcase(os.path.normpath(parent_path))
-    # 驱动器根格式：X:\ 或 X:
-    drive, tail = os.path.splitdrive(normalized_parent)
-    if not drive:
-        return False
-    tail_stripped = tail.strip(os.sep)
-    if tail_stripped:  # 非驱动器根（还有子路径）
-        return False
-    return dir_name.lower() in WINDOWS_SYSTEM_DIRS
-
 # ============================================================
 # 模块级 import 缓存：避免每次调用方法时重复 import 查找
 # ============================================================
@@ -72,27 +53,6 @@ class FileScanner:
     def __init__(self, max_file_size_bytes):
         self.max_file_size_bytes = max_file_size_bytes
         self.logger = Logger()
-
-    def scan_directory(self, root_dir):
-        if not os.path.exists(root_dir):
-            self.logger.error(f"扫描目录不存在: {root_dir}")
-            return []
-
-        target_files = []
-        for dirpath, dirnames, filenames in os.walk(root_dir):
-            # 跳过 Windows 系统目录：原地修改 dirnames 阻止 os.walk 递归进入
-            dirnames[:] = [
-                d for d in dirnames
-                if not _is_windows_system_dir(dirpath, d)
-            ]
-            for filename in filenames:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext in SUPPORTED_EXTENSIONS:
-                    full_path = os.path.join(dirpath, filename)
-                    target_files.append(full_path)
-
-        self.logger.info(f"扫描到 {len(target_files)} 个待检测文件")
-        return target_files
 
     def get_file_size_mb(self, file_path):
         try:
@@ -171,7 +131,7 @@ class FileScanner:
             return False, [], size_mb
 
         try:
-            if ext in (".txt", ".md", ".log"):
+            if ext == ".txt":
                 return self._read_plain_text_incremental(file_path, matcher, size_mb)
             elif ext == ".docx":
                 return self._read_docx_incremental(file_path, matcher, size_mb)

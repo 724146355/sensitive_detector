@@ -399,6 +399,8 @@ class EverythingScanner:
             else:
                 # SetMatchPath 不可用：使用 path: 修饰符强制该搜索词匹配路径
                 query_parts.insert(0, f'path:"{normalized_path}"')
+        # 排除 .log 文件（程序自身日志，不应扫描）
+        query_parts.append("!ext:log")
         # 在查询中排除 Windows 系统目录（仅排除驱动器根目录）
         # Everything 语法：!path:"C:\\Windows\\" 表示排除该路径下的文件
         # 只有全盘/单驱动器扫描时才加全局排除，以免排错用户指定的子目录
