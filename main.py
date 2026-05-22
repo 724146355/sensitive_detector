@@ -61,23 +61,7 @@ def _kill_thread(thread_ident):
         return False
 
 
-def get_user_input():
-    work_key = input("请输入密码Key（可为空，直接回车跳过）: ").strip()
 
-    size_input = input("请输入大文件过滤阈值（单位MB，直接回车使用默认值100MB）: ").strip()
-    if size_input == "":
-        user_max_size = None
-    else:
-        try:
-            user_max_size = float(size_input)
-            if user_max_size <= 0:
-                print("阈值必须为正数，将使用默认值")
-                user_max_size = None
-        except ValueError:
-            print("输入无效，将使用默认值")
-            user_max_size = None
-
-    return work_key, user_max_size
 
 
 def get_all_drives():
@@ -107,15 +91,8 @@ def resolve_target_paths():
             print("检测无指定参数，将扫描所有硬盘")
             return get_all_drives()
     else:
-        target = input("请输入要扫描的目录路径（直接回车则扫描所有硬盘）: ").strip()
-        if not target:
-            print("未指定路径，将扫描所有硬盘")
-            return get_all_drives()
-        if not os.path.exists(target):
-            print(f"路径不存在: {target}")
-            print("将扫描所有硬盘")
-            return get_all_drives()
-        return [os.path.abspath(target)]
+        print("未指定路径，将扫描所有硬盘")
+        return get_all_drives()
 
 
 def process_single_file(file_path, scanner, matcher, skip_size_check, start_times, start_lock, file_thread_map, file_thread_lock):
@@ -251,10 +228,8 @@ def main():
     logger.info(f"单文件超时: {file_timeout}秒")
     logger.info(f"线程空闲超时: {thread_idle_timeout}秒")
 
-    logger.info("-" * 60)
-    logger.info("请输入启动参数")
-    sys.stdout.flush()  # 确保所有日志已刷新到控制台，避免提示被缓冲
-    work_key, user_max_size = get_user_input()
+    work_key = ""
+    user_max_size = None
 
     effective_max_size = user_max_size if user_max_size is not None else default_max_size
     logger.info(f"工号Key: {'[已设置]' if work_key else '[为空]'}")
