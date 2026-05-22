@@ -116,7 +116,7 @@ class FileScanner:
         """提取文件全部文本（原有接口，保持兼容）"""
         ext = os.path.splitext(file_path)[1].lower()
         try:
-            if ext in (".txt", ".md", ".log"):
+            if ext == ".txt":
                 return self._read_plain_text(file_path)
             elif ext == ".docx":
                 return self._read_docx(file_path)
