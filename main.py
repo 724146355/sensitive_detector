@@ -248,29 +248,27 @@ def main():
     archiver = Archiver()
 
     # ----------------------------------------------------------
-    # 文件扫描阶段
+    # 文件扫描阶段（仅使用 Everything，不可用则退出）
     # ----------------------------------------------------------
     target_files = []
     everything = EverythingScanner()
     everything_filtered_size = False
 
-    if everything.available:
-        everything_files = everything.find_files(
-            target_paths, SUPPORTED_EXTENSIONS, max_size_bytes
-        )
-        if everything_files is not None:
-            target_files = everything_files
-            everything_filtered_size = everything._has_get_size_func
+    if not everything.available:
+        logger.error("Everything 不可用，无法扫描。请确保 Everything 已安装并在运行。")
+        input("按回车键退出...")
+        return
 
-    if not everything.available or (everything.available and everything_files is None):
-        if not everything.available:
-            logger.info("使用 Python 标准扫描（os.walk）作为回退方案...")
-        else:
-            logger.info("Everything 查询失败，使用 Python 标准扫描（os.walk）作为回退方案...")
-        for path in target_paths:
-            target_files.extend(scanner.scan_directory(path))
-    elif not target_files:
-        pass
+    everything_files = everything.find_files(
+        target_paths, SUPPORTED_EXTENSIONS, max_size_bytes
+    )
+    if everything_files is None:
+        logger.error("Everything 查询失败，无法扫描。请确保 Everything 服务正常运行。")
+        input("按回车键退出...")
+        return
+
+    target_files = everything_files
+    everything_filtered_size = everything._has_get_size_func
 
     if not target_files:
         logger.warning(f"未发现支持的文件类型 (支持: {', '.join(sorted(SUPPORTED_EXTENSIONS))})")
