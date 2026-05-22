@@ -12,6 +12,7 @@ import sys
 import platform
 from ctypes import wintypes
 from logger import Logger
+from file_scanner import WINDOWS_SYSTEM_DIRS
 
 
 # ============================================================
@@ -398,6 +399,18 @@ class EverythingScanner:
             else:
                 # SetMatchPath 不可用：使用 path: 修饰符强制该搜索词匹配路径
                 query_parts.insert(0, f'path:"{normalized_path}"')
+        # 在查询中排除 Windows 系统目录（仅排除驱动器根目录）
+        # Everything 语法：!path:"C:\\Windows\\" 表示排除该路径下的文件
+        # 只有全盘/单驱动器扫描时才加全局排除，以免排错用户指定的子目录
+        drive_root = ""
+        if normalized_path:
+            drive, tail = os.path.splitdrive(normalized_path)
+            if drive and tail.strip("\\") == "":  # C:\ 或 C:
+                drive_root = drive + "\\"  # 统一成 C:\
+        if drive_root:
+            for sys_dir in WINDOWS_SYSTEM_DIRS:
+                exclude_path = drive_root + sys_dir + "\\"
+                query_parts.append(f'!path:"{exclude_path}"')
         query = " ".join(query_parts)
     
         self.logger.debug(f"  Everything 查询: {query}")
@@ -477,7 +490,15 @@ class EverythingScanner:
                     else:
                         # 获取大小失败，跳过大小过滤，保留该文件
                         self.logger.debug(f"  获取文件大小失败，跳过大小过滤: {full_path}")
-    
+
+                # 兑底过滤：排除 Windows 系统目录（防止 !path: 语法在旧版 Everything 不生效）
+                path_lower = os.path.normcase(full_path)
+                drive, tail = os.path.splitdrive(path_lower)
+                if drive:
+                    parts = tail.lstrip(os.sep).split(os.sep)
+                    if parts and parts[0] in WINDOWS_SYSTEM_DIRS:
+                        continue
+
                 results.append(full_path)
             except Exception as e:
                 self.logger.debug(f"  处理第 {i} 个结果时异常: {type(e).__name__}: {e}")

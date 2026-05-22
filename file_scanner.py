@@ -8,10 +8,39 @@ SUPPORTED_EXTENSIONS = {
     ".doc", ".docx",
     ".xls", ".xlsx", ".csv",
     ".ppt", ".pptx",
-    ".txt", ".md", ".log",
+    ".txt", ".md",
     ".pdf",
     ".wps", ".et", ".dps"
 }
+
+# Windows 系统目录黑名单（路径前缀，不区分大小写）
+# 这些目录属于系统/程序安装区域，不含用户数据，跳过可大幅减少无效扫描
+WINDOWS_SYSTEM_DIRS = {
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "$recycle.bin",
+    "system volume information",
+}
+
+
+def _is_windows_system_dir(parent_path, dir_name):
+    """判断目录是否为 Windows 系统目录（仅在驱动器根下才过滤）
+
+    只过滤驱动器根目录下的系统目录（如 C:\\Windows、C:\\Program Files），
+    避免误过滤用户自建的同名子文件夹。
+    """
+    # 判断 parent_path 是否为驱动器根（如 C:\ 或 C:）
+    normalized_parent = os.path.normcase(os.path.normpath(parent_path))
+    # 驱动器根格式：X:\ 或 X:
+    drive, tail = os.path.splitdrive(normalized_parent)
+    if not drive:
+        return False
+    tail_stripped = tail.strip(os.sep)
+    if tail_stripped:  # 非驱动器根（还有子路径）
+        return False
+    return dir_name.lower() in WINDOWS_SYSTEM_DIRS
 
 # ============================================================
 # 模块级 import 缓存：避免每次调用方法时重复 import 查找
@@ -50,7 +79,12 @@ class FileScanner:
             return []
 
         target_files = []
-        for dirpath, _, filenames in os.walk(root_dir):
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            # 跳过 Windows 系统目录：原地修改 dirnames 阻止 os.walk 递归进入
+            dirnames[:] = [
+                d for d in dirnames
+                if not _is_windows_system_dir(dirpath, d)
+            ]
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
                 if ext in SUPPORTED_EXTENSIONS:
