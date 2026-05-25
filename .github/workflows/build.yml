@@ -1,0 +1,77 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: ["main", "master"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+env:
+  # 兼容 Windows XP: Python 3.8 是最后一个有非官方 XP 构建的版本
+  # 需配合 PyInstaller 4.x (引导程序支持 XP) 使用
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 设置 Python 3.8 (32位, 兼容XP)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.8"
+          architecture: "x86"
+          cache: "pip"
+
+      - name: 安装项目依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 验证依赖完整性
+        run: |
+          python -c "
+          deps = ['docx', 'olefile', 'openpyxl', 'xlrd', 'pptx', 'pdfplumber', 'pyzipper']
+          for d in deps:
+              try:
+                  __import__(d)
+                  print(f'  OK: {d}')
+              except ImportError:
+                  print(f'  MISSING: {d}')
+          "
+
+      - name: 使用 PyInstaller 构建单文件 EXE
+        run: |
+          pyinstaller --clean --noconfirm sensitive_detector.spec
+
+      - name: 验证构建产物
+        run: |
+          if (Test-Path "dist/SensitiveDetector.exe") {
+              $file = Get-Item "dist/SensitiveDetector.exe"
+              $sizeMB = [math]::Round($file.Length / 1MB, 2)
+              Write-Host "构建成功！"
+              Write-Host "  输出路径: $($file.FullName)"
+              Write-Host "  文件大小: ${sizeMB}MB"
+          } else {
+              Write-Error "构建失败：dist/SensitiveDetector.exe 未找到"
+              exit 1
+          }
+
+      - name: 上传 EXE 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SensitiveDetector_Portable
+          path: dist/SensitiveDetector.exe
+          if-no-files-found: error
+
+      - name: 创建 Release（仅当推送标签时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/SensitiveDetector.exe
+          generate_release_notes: true
+          name: Release ${{ github.ref_name }}
